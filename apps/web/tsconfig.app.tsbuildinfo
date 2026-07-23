@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/auth-context.tsx","./src/main.tsx","./src/socket.ts","./src/store.test.ts","./src/store.ts","./src/components/Character.tsx","./src/components/Logo.tsx","./src/components/Scenes.tsx","./src/pages/AuthPage.tsx","./src/pages/GamePage.tsx","./src/pages/LobbyPage.tsx","./src/pages/TokenPages.tsx"],"version":"5.9.3"}
