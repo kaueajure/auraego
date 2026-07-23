@@ -1,8 +1,10 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
+// Root package is CommonJS for Hostinger; ESLint config remains ESM explicitly.
+
 export default tseslint.config(
-  { ignores: ["**/dist/**", "**/coverage/**", "**/generated/**"] },
+  { ignores: ["**/dist/**", "**/coverage/**", "**/generated/**", "public/**", "server.bundle.*"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -19,5 +21,10 @@ export default tseslint.config(
   {
     files: ["apps/server/**/*.ts"],
     languageOptions: { globals: { process: "readonly", Buffer: "readonly", console: "readonly", setTimeout: "readonly", clearTimeout: "readonly", setInterval: "readonly", clearInterval: "readonly" } }
+  },
+  {
+    files: ["app.js"],
+    languageOptions: { globals: { require: "readonly" } },
+    rules: { "@typescript-eslint/no-require-imports": "off" }
   }
 );

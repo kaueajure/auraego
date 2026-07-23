@@ -5,10 +5,10 @@ import { build } from "esbuild";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 await build({
   entryPoints: [path.join(root, "apps/server/src/index.ts")],
-  outfile: path.join(root, "server.bundle.js"),
+  outfile: path.join(root, "server.bundle.cjs"),
   bundle: true,
   platform: "node",
-  format: "esm",
+  format: "cjs",
   target: "node22",
   sourcemap: false,
   packages: "external",

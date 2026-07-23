@@ -105,15 +105,16 @@ Node.js: 22
 
 A Hostinger deve executar a instalação e o build em fases separadas. Não há
 `postinstall`: após concluir `npm install`, o painel deve executar
-`npm run build`. Esse comando gera `server.bundle.js` e `public/` diretamente
+`npm run build`. Esse comando gera `server.bundle.cjs` e `public/` diretamente
 na raiz do runtime antes de carregar `app.js`. O bundle inclui a engine
 compartilhada e mantém apenas dependências npm como externas.
 
-Os artefatos raiz `server.bundle.js` e `public/` são
+Os artefatos raiz `server.bundle.cjs` e `public/` são
 intencionalmente versionados. A hospedagem Express da Hostinger pode recriar o
 diretório de runtime apenas com arquivos do repositório; versioná-los impede
-que o entrypoint seja publicado sem o bundle e evita um 503 por
-`ERR_MODULE_NOT_FOUND`.
+que o entrypoint seja publicado sem o bundle e evita erros de módulo no
+runtime. `app.js` e o bundle usam CommonJS porque o LiteSpeed `lsnode.js` da
+Hostinger carrega o entrypoint com `require()`.
 
 Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. Adicione também `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` e `DATABASE_SSL` com os dados do MySQL da Hostinger. O processo Express entrega os arquivos do Vite, mantém o Socket.IO ativo e utiliza um pool MySQL de até dez conexões.
 

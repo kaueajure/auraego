@@ -2,7 +2,7 @@
   "name": "aura-ego",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
+  "type": "commonjs",
   "main": "app.js",
   "workspaces": [
     "apps/*",
