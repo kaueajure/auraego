@@ -1,5 +1,8 @@
 node_modules
 dist
+public
+server.bundle.js
+server.bundle.js.map
 coverage
 .env
 .env.*

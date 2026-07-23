@@ -3,7 +3,6 @@ import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import { env } from "./config.js";
 import { authRouter } from "./auth.js";
@@ -25,7 +24,7 @@ app.use("/training", trainingRouter);
 // In production the same Node process serves the compiled Vite application.
 // This keeps HTTP, WebSocket and frontend under one origin and one Hostinger app.
 if (env.NODE_ENV === "production") {
-  const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
+  const webDist = path.resolve(process.cwd(), "public");
   app.use(express.static(webDist, { index: false, maxAge: "1y", immutable: true }));
   app.use((req, res, next) => {
     if (req.method !== "GET" || !req.accepts("html")) return next();
