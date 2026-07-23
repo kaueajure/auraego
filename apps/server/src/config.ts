@@ -1,4 +1,11 @@
+import dotenv from "dotenv";
 import { z } from "zod";
+
+// npm workspaces execute scripts from apps/server, while Hostinger starts app.js
+// from the repository root. Load both locations without overriding injected
+// production environment variables.
+dotenv.config({ quiet: true });
+dotenv.config({ path: new URL("../../../.env", import.meta.url), override: false, quiet: true });
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),

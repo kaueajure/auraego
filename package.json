@@ -6,6 +6,7 @@
   "main": "app.js",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
+    "postinstall": "npm run build",
     "dev": "npm run build -w @aura-ego/shared && concurrently -n server,web -c yellow,cyan \"npm run dev -w @aura-ego/server\" \"npm run dev -w @aura-ego/web\"",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "npm run typecheck --workspaces --if-present",
