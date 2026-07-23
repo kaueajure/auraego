@@ -36,9 +36,10 @@ export function attachRealtime(io: Server) {
   io.on("connection", socket => {
     socket.emit("clock:sync", { serverTime: Date.now() });
     socket.on("ping:measure", (sentAt: number, ack) => ack({ sentAt, serverTime: Date.now() }));
+    socket.on("latency:report", (latency: number) => { if (Number.isFinite(latency)) socket.data.latency = Math.max(0, Math.min(latency, 2000)); });
     socket.on("matchmaking:join", () => joinQueue(io, socket));
     socket.on("matchmaking:leave", () => leaveQueue(socket, true));
-    socket.on("training:start", (payload: { difficulty?: BotDifficulty }) => startTraining(io, socket, payload?.difficulty));
+    socket.on("training:start", (payload: { difficulty?: BotDifficulty }) => void startTraining(io, socket, payload?.difficulty));
     socket.on("match:ready", () => {
       const room = getRoomFor(socket); if (!room) return;
       socket.join(room.id); socket.emit("match:state", safeState(room));
@@ -92,20 +93,21 @@ async function createRankedRoom(io: Server, first: QueueEntry, second: QueueEntr
   setTimeout(() => startRoom(io, room), 2500);
 }
 
-function startTraining(io: Server, socket: Socket, requested?: BotDifficulty) {
+async function startTraining(io: Server, socket: Socket, requested?: BotDifficulty) {
   const user = socketUsers.get(socket.id)!;
   if (playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_PLAYING", message: "Você já está em uma partida." });
   const difficulty: BotDifficulty = ["INICIANTE", "NORMAL", "DIFICIL", "INSANO"].includes(requested || "") ? requested! : "NORMAL";
-  const seed = Math.floor(Math.random() * 2_000_000_000), id = `training:${user.id}:${Date.now()}`;
-  const room = makeRoom(id, "TRAINING", seed, [user, { id: `bot:${id}`, username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro", mmr: user.mmr, verified: true, region: user.region }]);
-  room.difficulty = difficulty; room.sockets.set(user.id, socket.id); rooms.set(id, room); playerRooms.set(user.id, id); socket.join(id);
-  socket.emit("match:found", { roomId: id, players: Object.values(room.state.players).map(p => ({ id: p.id, username: p.username })), seed, training: true, difficulty });
+  const seed = Math.floor(Math.random() * 2_000_000_000);
+  const match = await prisma.match.create({ data: { mode: "TRAINING", status: "LOADING", seed, participants: { create: { userId: user.id, mmrBefore: user.mmr } } } });
+  const room = makeRoom(match.id, "TRAINING", seed, [user, { id: `bot:${match.id}`, username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro", mmr: user.mmr, verified: true, region: user.region }]);
+  room.difficulty = difficulty; room.sockets.set(user.id, socket.id); rooms.set(room.id, room); playerRooms.set(user.id, room.id); socket.join(room.id);
+  socket.emit("match:found", { roomId: room.id, players: Object.values(room.state.players).map(p => ({ id: p.id, username: p.username })), seed, training: true, difficulty });
   setTimeout(() => startRoom(io, room), 1200);
 }
 
 function makeRoom(id: string, mode: Room["mode"], seed: number, users: ConnectedUser[]): Room {
   const now = Date.now();
-  return { id, mode, state: createGame(seed, users, now), events: [], sockets: new Map(), eventCursor: 0, timer: setInterval(() => {}, 2 ** 30), disconnected: new Map(), ending: false };
+  return { id, mode, state: createGame(seed, users, now), events: [], sockets: new Map(), eventCursor: 0, timer: setInterval(() => {}, 60_000), disconnected: new Map(), ending: false };
 }
 
 function startRoom(io: Server, room: Room) {
@@ -113,7 +115,7 @@ function startRoom(io: Server, room: Room) {
   const now = Date.now();
   room.state.phase = "ROUND_ACTIVE"; room.state.roundEndsAt = now + 45_000;
   room.events = generateEvents(room.state.seed + room.state.round, now, 10); room.eventCursor = 0;
-  if (room.mode === "RANKED") void prisma.match.update({ where: { id: room.id }, data: { status: "ACTIVE", startedAt: new Date() } });
+  void prisma.match.update({ where: { id: room.id }, data: { status: "ACTIVE", startedAt: new Date() } });
   io.to(room.id).emit("match:start", { ...safeState(room), countdownEndedAt: now });
   room.timer = setInterval(() => tickRoom(io, room), 100);
 }
@@ -204,11 +206,19 @@ async function finishRoom(io: Server, room: Room, winnerId: string, reason: stri
       prisma.match.update({ where: { id: room.id }, data: { status: "FINISHED", endedAt: new Date(), winnerId, finishReason: reason } }),
       ...updates.flatMap(({ p, profile, won, delta }) => [
         prisma.matchParticipant.update({ where: { matchId_userId: { matchId: room.id, userId: p.id } }, data: { aura: p.aura, remainingEgo: p.ego, highestCombo: p.highestCombo, accuracy: p.totalActions ? p.successfulActions / p.totalActions : 0, perfectActions: p.perfectActions, mistakes: p.mistakes, spamViolations: p.spamViolations, mmrAfter: profile.mmr + delta, result: won ? "WIN" : "LOSS" } }),
-        prisma.playerProfile.update({ where: { userId: p.id }, data: { mmr: { increment: delta }, totalAura: { increment: p.aura }, experience: { increment: won ? 120 : 60 }, wins: won ? { increment: 1 } : undefined, losses: won ? undefined : { increment: 1 }, winStreak: won ? { increment: 1 } : 0 } })
+        prisma.playerProfile.update({ where: { userId: p.id }, data: { mmr: profile.mmr + delta, currentRank: rankFor(profile.mmr + delta), totalAura: { increment: p.aura }, experience: profile.experience + (won ? 120 : 60), level: Math.floor((profile.experience + (won ? 120 : 60)) / 500) + 1, wins: won ? { increment: 1 } : undefined, losses: won ? undefined : { increment: 1 }, winStreak: won ? { increment: 1 } : 0 } })
       ])
     ]);
     io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room), mmrChanges: Object.fromEntries(updates.map(u => [u.p.id, u.delta])) });
-  } else io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
+  } else {
+    const human = players.find(p => !p.id.startsWith("bot:"))!;
+    await prisma.$transaction([
+      prisma.match.update({ where: { id: room.id }, data: { status: "FINISHED", endedAt: new Date(), winnerId: winnerId === human.id ? human.id : null, finishReason: reason } }),
+      prisma.matchParticipant.update({ where: { matchId_userId: { matchId: room.id, userId: human.id } }, data: { aura: human.aura, remainingEgo: human.ego, highestCombo: human.highestCombo, accuracy: human.totalActions ? human.successfulActions / human.totalActions : 0, perfectActions: human.perfectActions, mistakes: human.mistakes, spamViolations: human.spamViolations, mmrAfter: null, result: winnerId === human.id ? "WIN" : "LOSS" } }),
+      prisma.playerProfile.update({ where: { userId: human.id }, data: { totalAura: { increment: human.aura }, experience: { increment: 35 } } })
+    ]);
+    io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
+  }
   setTimeout(() => cleanupRoom(room), 5000);
 }
 
@@ -249,4 +259,15 @@ function forfeit(io: Server, socket: Socket) {
 function cleanupRoom(room: Room) {
   clearInterval(room.timer); rooms.delete(room.id);
   for (const id of Object.keys(room.state.players)) if (!id.startsWith("bot:")) playerRooms.delete(id);
+}
+
+function rankFor(mmr: number) {
+  if (mmr >= 1900) return "AURA_LENDARIA";
+  if (mmr >= 1750) return "EGO_INABALAVEL";
+  if (mmr >= 1600) return "PRESENCA_DOMINANTE";
+  if (mmr >= 1450) return "SIX_SEVEN_CERTIFICADO";
+  if (mmr >= 1300) return "FARMER_DE_AURA";
+  if (mmr >= 1150) return "AURA_QUESTIONAVEL";
+  if (mmr >= 950) return "EGO_FRAGIL";
+  return "SEM_PRESENCA";
 }

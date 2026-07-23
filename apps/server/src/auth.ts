@@ -5,7 +5,7 @@ import { z } from "zod";
 import { prisma } from "./db.js";
 import { accessToken, randomToken, refreshToken, sha256, verifyRefresh, type AuthedRequest } from "./security.js";
 import { sendRecovery, sendVerification } from "./email.js";
-import { env } from "./config.js";
+import { durationMs, env } from "./config.js";
 
 export const authRouter = Router();
 const strictLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
@@ -20,7 +20,7 @@ authRouter.post("/register", strictLimit, async (req, res, next) => {
     const exists = await prisma.user.findFirst({ where: { OR: [{ email: data.email }, { username: { equals: data.username, mode: "insensitive" } }] } });
     if (exists) return res.status(409).json({ error: { code: "ACCOUNT_CONFLICT", message: "Não foi possível criar a conta com esses dados." } });
     const raw = randomToken(), tokenHash = sha256(raw);
-    const user = await prisma.user.create({ data: { username: data.username, email: data.email, passwordHash: await bcrypt.hash(data.password, 12), profile: { create: {} }, verificationTokens: { create: { tokenHash, expiresAt: new Date(Date.now() + 86400_000) } } } });
+    const user = await prisma.user.create({ data: { username: data.username, email: data.email, passwordHash: await bcrypt.hash(data.password, 12), profile: { create: {} }, verificationTokens: { create: { tokenHash, expiresAt: new Date(Date.now() + durationMs(env.EMAIL_VERIFICATION_EXPIRES_IN)) } } } });
     try { await sendVerification(user.email, user.username, raw); }
     catch (error) { await prisma.user.delete({ where: { id: user.id } }); throw error; }
     res.status(201).json({ message: "Conta criada. Confira seu e-mail para confirmar sua presença." });
@@ -37,7 +37,7 @@ authRouter.post("/login", strictLimit, async (req, res, next) => {
       return res.status(401).json({ error: { code: "INVALID_CREDENTIALS", message: "E-mail ou senha inválidos." } });
     }
     if (user.lockedUntil && user.lockedUntil > new Date()) return res.status(429).json({ error: { code: "TEMPORARILY_LOCKED", message: "Muitas tentativas. Aguarde alguns minutos." } });
-    const session = await prisma.session.create({ data: { userId: user.id, refreshTokenHash: "pending", expiresAt: new Date(Date.now() + 7 * 86400_000), ...requestMeta(req) } });
+    const session = await prisma.session.create({ data: { userId: user.id, refreshTokenHash: "pending", expiresAt: new Date(Date.now() + durationMs(env.JWT_REFRESH_EXPIRES_IN)), ...requestMeta(req) } });
     const refresh = refreshToken(user.id, session.id);
     await prisma.$transaction([prisma.session.update({ where: { id: session.id }, data: { refreshTokenHash: sha256(refresh) } }), prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts: 0, lockedUntil: null, lastLoginAt: new Date() } })]);
     res.cookie("refresh_token", refresh, cookie).json({ accessToken: accessToken(user.id, session.id), user: publicUser(user) });
@@ -49,7 +49,11 @@ authRouter.post("/refresh", async (req, res) => {
     const raw = req.cookies.refresh_token;
     const claims = verifyRefresh(raw);
     const session = await prisma.session.findUnique({ where: { id: claims.sid }, include: { user: { include: { profile: true } } } });
-    if (!session || session.revokedAt || session.expiresAt < new Date() || sha256(raw) !== session.refreshTokenHash || !session.user.profile) throw new Error("invalid");
+    if (!session || session.revokedAt || session.expiresAt < new Date() || !session.user.profile) throw new Error("invalid");
+    if (sha256(raw) !== session.refreshTokenHash) {
+      await prisma.session.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
+      throw new Error("replayed");
+    }
     const rotated = refreshToken(session.userId, session.id);
     await prisma.session.update({ where: { id: session.id }, data: { refreshTokenHash: sha256(rotated) } });
     res.cookie("refresh_token", rotated, cookie).json({ accessToken: accessToken(session.userId, session.id), user: publicUser(session.user) });
@@ -77,7 +81,7 @@ authRouter.post("/resend-verification", strictLimit, async (req, res) => {
     const last = user.verificationTokens[0];
     if (!last || Date.now() - last.createdAt.getTime() >= 60_000) {
       const raw = randomToken();
-      await prisma.verificationToken.create({ data: { userId: user.id, tokenHash: sha256(raw), expiresAt: new Date(Date.now() + 86400_000) } });
+      await prisma.verificationToken.create({ data: { userId: user.id, tokenHash: sha256(raw), expiresAt: new Date(Date.now() + durationMs(env.EMAIL_VERIFICATION_EXPIRES_IN)) } });
       await sendVerification(user.email, user.username, raw);
     }
   }

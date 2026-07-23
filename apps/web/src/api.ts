@@ -1,6 +1,7 @@
 import type { ApiError, PublicUser } from "@aura-ego/shared";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
+// Empty in production means same origin: Express serves both API and frontend.
+const API = import.meta.env.VITE_API_URL || "";
 let token: string | null = null;
 export const setToken = (value: string | null) => { token = value; };
 export const getToken = () => token;

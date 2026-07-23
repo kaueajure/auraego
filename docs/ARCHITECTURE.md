@@ -27,6 +27,10 @@ Socket.IO autenticado ──► sala autoritativa ──► engine determinísti
                               PostgreSQL
 ```
 
+## Unidade de deploy
+
+Frontend, API e Socket.IO são publicados como um único serviço. O build preserva módulos separados no repositório, mas o processo Express de produção serve `apps/web/dist`, responde às rotas HTTP e mantém as conexões WebSocket. Isso elimina CORS entre frontend/backend e exige apenas uma aplicação na hospedagem.
+
 O cliente nunca envia pontos, ego, multiplicador, vencedor, estado do rival ou relógio oficial. Sequências repetidas ou regressivas, timestamps fora de cinco segundos, frequência excessiva e inputs fora do estado ativo são rejeitados.
 
 ## Estado e eventos

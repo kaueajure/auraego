@@ -5,11 +5,12 @@
   "type": "module",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w @aura-ego/server\" \"npm run dev -w @aura-ego/web\"",
+    "dev": "npm run build -w @aura-ego/shared && concurrently -n server,web -c yellow,cyan \"npm run dev -w @aura-ego/server\" \"npm run dev -w @aura-ego/web\"",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @aura-ego/shared && npm run build -w @aura-ego/server && npm run build -w @aura-ego/web",
+    "start": "npm start -w @aura-ego/server",
     "db:generate": "npm run db:generate -w @aura-ego/server",
     "db:migrate": "npm run db:migrate -w @aura-ego/server"
   },

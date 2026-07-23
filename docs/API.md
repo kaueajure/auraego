@@ -43,6 +43,7 @@ Cliente → servidor:
 - `match:reconnect`
 - `match:leave`
 - `ping:measure(sentAt, ack)`
+- `latency:report(roundTripMs)`
 
 Servidor → cliente:
 

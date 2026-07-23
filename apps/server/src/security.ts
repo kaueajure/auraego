@@ -8,7 +8,7 @@ export interface AuthedRequest extends Request { auth?: Claims }
 export const sha256 = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
 export const randomToken = () => crypto.randomBytes(32).toString("base64url");
 export const accessToken = (userId: string, sessionId: string) => jwt.sign({ sub: userId, sid: sessionId, type: "access" }, env.JWT_ACCESS_SECRET, { expiresIn: env.JWT_ACCESS_EXPIRES_IN as jwt.SignOptions["expiresIn"] });
-export const refreshToken = (userId: string, sessionId: string) => jwt.sign({ sub: userId, sid: sessionId, type: "refresh" }, env.JWT_REFRESH_SECRET, { expiresIn: env.JWT_REFRESH_EXPIRES_IN as jwt.SignOptions["expiresIn"] });
+export const refreshToken = (userId: string, sessionId: string) => jwt.sign({ sub: userId, sid: sessionId, type: "refresh" }, env.JWT_REFRESH_SECRET, { expiresIn: env.JWT_REFRESH_EXPIRES_IN as jwt.SignOptions["expiresIn"], jwtid: crypto.randomUUID() });
 export const verifyAccess = (token: string) => jwt.verify(token, env.JWT_ACCESS_SECRET) as Claims;
 export const verifyRefresh = (token: string) => jwt.verify(token, env.JWT_REFRESH_SECRET) as Claims;
 

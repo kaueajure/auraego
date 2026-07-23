@@ -1,6 +1,6 @@
 # Aura & Ego
 
-Jogo competitivo 3D para navegador sobre timing, leitura do adversário e controle de recursos. A aplicação é um monorepo com frontend React/Three.js, API Express/PostgreSQL e salas Socket.IO autoritativas.
+Jogo competitivo 3D para navegador sobre timing, leitura do adversário e controle de recursos. O código é organizado como monorepo, mas a entrega de produção é uma única aplicação: um processo Express serve o frontend React/Three.js compilado, a API e as salas Socket.IO autoritativas no mesmo domínio e porta.
 
 ## Arquitetura
 
@@ -26,7 +26,7 @@ docs/
   ARCHITECTURE.md       decisões, segurança e regras operacionais
 ```
 
-O backend é a fonte de verdade nas partidas. O cliente envia apenas `input`, timestamp e sequência; aura, ego, combo, eventos, relógio, resultado e MMR são calculados no servidor. A engine compartilhada evita divergência de tipos e permite pré-visualização segura, mas o estado do servidor sempre prevalece.
+O backend é a fonte de verdade nas partidas. O cliente envia apenas `input`, timestamp e sequência; aura, ego, combo, eventos, relógio, resultado e MMR são calculados no servidor. A engine compartilhada evita divergência de tipos e permite pré-visualização segura, mas o estado do servidor sempre prevalece. Em produção, `npm run build` gera todos os pacotes e `npm start` inicia o único serviço Express, que também entrega `apps/web/dist`.
 
 ## Pré-requisitos
 
@@ -80,6 +80,19 @@ Em produção:
 - configure `NODE_ENV=production` para cookies `Secure`;
 - execute `prisma migrate deploy` no processo de release;
 - use um adaptador Socket.IO compartilhado (Redis) antes de escalar para mais de uma instância.
+
+## Deploy único na Hostinger
+
+Crie somente uma **Node.js Web App** e selecione **Express**.
+
+```text
+Build command: npm run build
+Start command: npm start
+Entry file (se solicitado): apps/server/dist/index.js
+Node.js: 22
+```
+
+Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. O processo Express entrega os arquivos do Vite e mantém o Socket.IO ativo.
 
 ## Qualidade
 

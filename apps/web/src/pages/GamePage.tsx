@@ -6,10 +6,11 @@ import { Logo } from "../components/Logo";
 import { ArenaScene } from "../components/Scenes";
 import { gameSocket } from "../socket";
 import { useGame } from "../store";
+import { api } from "../api";
 
 const labels: Record<string, string> = { ERROU: "Errou", FORA_DO_RITMO: "Fora do ritmo", FORCADO: "Forçou demais", SEM_AURA: "Segura…", LIMPO: "Limpo", AURA_FARM: "Aura farm", SIX_SEVEN_PERFEITO: "Six Seven perfeito", EGO_DESTRUIDO: "Ego destruído", AURA_LENDARIA: "Aura lendária" };
 export function GamePage() {
-  const { user } = useAuth(), game = useGame(), navigate = useNavigate(), socket = gameSocket();
+  const { user, updateUser } = useAuth(), game = useGame(), navigate = useNavigate(), socket = gameSocket();
   const [connection, setConnection] = useState("Boa"), [action, setAction] = useState<"idle" | "six" | "seven">("idle"), [opponentAction, setOpponentAction] = useState<"idle" | "six" | "seven">("idle");
   const [countdown, setCountdown] = useState(3), [ended, setEnded] = useState<{ winnerId: string; reason: string; mmrChanges?: Record<string, number> } | null>(null);
   const [tutorial, setTutorial] = useState(!user?.profile.tutorialCompleted), [tutorialStep, setTutorialStep] = useState(0);
@@ -28,7 +29,15 @@ export function GamePage() {
     const connect = () => { setConnection("Boa"); if (game.roomId) socket.emit("match:reconnect"); };
     socket.on("match:found", found).on("match:start", start).on("match:state", state).on("match:event", event).on("match:action", actionEvent).on("match:end", end).on("disconnect", disconnect).on("connect", connect);
     socket.emit("match:ready");
-    return () => { socket.off("match:found", found).off("match:start", start).off("match:state", state).off("match:event", event).off("match:action", actionEvent).off("match:end", end).off("disconnect", disconnect).off("connect", connect); };
+    const ping = setInterval(() => {
+      const sent = Date.now();
+      socket.emit("ping:measure", sent, () => {
+        const latency = Date.now() - sent;
+        socket.emit("latency:report", latency);
+        setConnection(latency < 100 ? "Boa" : latency < 250 ? "Instável" : "Ruim");
+      });
+    }, 5000);
+    return () => { clearInterval(ping); socket.off("match:found", found).off("match:start", start).off("match:state", state).off("match:event", event).off("match:action", actionEvent).off("match:end", end).off("disconnect", disconnect).off("connect", connect); };
   }, [socket, user?.id, game.roomId]);
   useEffect(() => { if (game.status === "PLAYING") return; const timer = setInterval(() => setCountdown(v => Math.max(1, v - 1)), 1000); return () => clearInterval(timer); }, [game.status]);
   const input = useCallback((kind: InputKind) => {
@@ -48,6 +57,13 @@ export function GamePage() {
   const eventProgress = game.event ? Math.max(0, Math.min(100, ((Date.now() - game.event.startsAt) / game.event.duration) * 100)) : 0;
   const resultStats = useMemo(() => me ? [{ label: "Maior combo", value: me.highestCombo }, { label: "Perfeitos", value: me.perfectActions }, { label: "Erros", value: me.mistakes }, { label: "Spam", value: me.spamViolations }] : [], [me]);
   const leave = () => { socket.emit("match:leave"); game.reset(); navigate("/"); };
+  const completeTutorial = () => {
+    setTutorial(false);
+    if (user && !user.profile.tutorialCompleted) {
+      void api("/users/me", { method: "PATCH", body: JSON.stringify({ tutorialCompleted: true }) })
+        .then(() => updateUser({ ...user, profile: { ...user.profile, tutorialCompleted: true } }));
+    }
+  };
   return <main className="game-page">
     <div className="arena"><ArenaScene playerAction={action} opponentAction={opponentAction} /></div>
     <header className="game-top"><Logo compact /><div className="round-info"><small>RODADA</small><strong>{game.state?.round || 1}<i>/3</i></strong></div><div className="timer">{String(Math.floor(seconds / 60)).padStart(2, "0")}:{String(seconds % 60).padStart(2, "0")}</div><div className={`connection ${connection.toLowerCase()}`}><i />{connection}</div><button className="exit" onClick={leave}>Sair</button></header>
@@ -60,7 +76,7 @@ export function GamePage() {
     {game.evaluation && <div key={`${game.evaluation.evaluation}-${Date.now()}`} className={`evaluation ${game.evaluation.auraDelta > 0 ? "positive" : "negative"}`}><strong>{labels[game.evaluation.evaluation]}</strong>{game.evaluation.auraDelta > 0 && <span>+{game.evaluation.auraDelta} aura</span>}</div>}
     <div className="controls" aria-label="Controles Six Seven"><button onPointerDown={() => input("SIX")}><small>TECLA</small><strong>6</strong><span>Mão esquerda</span></button><div><i /> ritmo <i /></div><button onPointerDown={() => input("SEVEN")}><small>TECLA</small><strong>7</strong><span>Mão direita</span></button></div>
     {game.status !== "PLAYING" && !ended && <div className="countdown"><small>POSTURA</small><strong>{countdown}</strong><p>A partida começa no ritmo do servidor</p></div>}
-    {tutorial && <Tutorial step={tutorialStep} next={() => setTutorialStep(v => v + 1)} close={() => setTutorial(false)} />}
+    {tutorial && <Tutorial step={tutorialStep} next={() => setTutorialStep(v => v + 1)} close={completeTutorial} />}
     {ended && <div className="result-overlay"><div className="result-card"><small>PARTIDA ENCERRADA</small><h1>{ended.winnerId === me?.id ? "Presença confirmada." : "Ego abalado."}</h1><p>{ended.winnerId === me?.id ? "Você leu a quadra e controlou o momento." : "A aura volta. O replay ensina."}</p><div className="result-score"><span><small>VOCÊ</small><b>{me?.aura || 0}</b></span><i>—</i><span><small>RIVAL</small><b>{opponent?.aura || 0}</b></span></div><div className="result-stats">{resultStats.map(s => <div key={s.label}><small>{s.label}</small><b>{s.value}</b></div>)}</div>{ended.mmrChanges?.[me?.id || ""] !== undefined && <p className="mmr-change">MMR {ended.mmrChanges[me!.id]! >= 0 ? "+" : ""}{ended.mmrChanges[me!.id]}</p>}<button className="primary" onClick={() => { game.reset(); navigate("/"); }}>Voltar ao menu →</button></div></div>}
   </main>;
 }
