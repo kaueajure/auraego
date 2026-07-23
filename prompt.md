@@ -169,7 +169,11 @@ PORT=3000
 FRONTEND_URL=http://localhost:5173
 BACKEND_URL=http://localhost:3000
 
-DATABASE_URL=mysql://usuario:senha@localhost:3306/aura_ego
+DATABASE_HOST=localhost
+DATABASE_PORT=3306
+DATABASE_NAME=aura_ego
+DATABASE_USERNAME=usuario
+DATABASE_PASSWORD=
 DATABASE_SSL=false
 
 JWT_ACCESS_SECRET=

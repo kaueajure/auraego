@@ -51,14 +51,16 @@ O backend é a fonte de verdade nas partidas. O cliente envia apenas `input`, ti
    openssl rand -base64 48
    ```
 
-3. Configure `DATABASE_URL` com as credenciais exibidas em **hPanel → Bancos de dados → Gerenciamento**:
+3. Configure as variáveis do banco com as credenciais exibidas em **hPanel → Bancos de dados → Gerenciamento**:
 
    ```env
-   DATABASE_URL=mysql://usuario:senha@host:3306/aura_ego
+   DATABASE_HOST=host
+   DATABASE_PORT=3306
+   DATABASE_NAME=aura_ego
+   DATABASE_USERNAME=usuario
+   DATABASE_PASSWORD=senha
    DATABASE_SSL=false
    ```
-
-   Caso a senha contenha `@`, `:`, `/`, `#` ou outros caracteres reservados de URL, codifique-a com percent-encoding.
 
 4. Configure SMTP. Em desenvolvimento, Mailpit ou MailHog podem ser usados com host local e sem TLS; em produção, use as credenciais do provedor, `SMTP_SECURE=true` para porta 465 ou a configuração recomendada pelo serviço.
 
@@ -79,7 +81,7 @@ Frontend: `http://localhost:5173`. Backend: `http://localhost:3000`.
 
 ## Variáveis
 
-Todas estão documentadas em [.env.example](.env.example). São obrigatórias: origens do frontend/backend, `DATABASE_URL` iniciada por `mysql://`, os dois segredos JWT, o segredo de verificação, todos os campos SMTP e a origem Socket.IO. O servidor valida a configuração e testa a conexão MySQL antes de abrir a porta. Ele informa apenas os nomes inválidos, nunca valores.
+Todas estão documentadas em [.env.example](.env.example). São obrigatórias: origens do frontend/backend, host, porta, nome, usuário e senha do MySQL, os dois segredos JWT, o segredo de verificação, todos os campos SMTP e a origem Socket.IO. O servidor valida a configuração e testa a conexão MySQL antes de abrir a porta. Ele informa apenas os nomes inválidos, nunca valores.
 
 Em produção:
 
@@ -101,7 +103,7 @@ Entry file: deixe vazio (a Hostinger detecta pelo `main` do package.json)
 Node.js: 22
 ```
 
-Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. Adicione também a `DATABASE_URL` fornecida pelo MySQL da Hostinger. O processo Express entrega os arquivos do Vite, mantém o Socket.IO ativo e utiliza um pool MySQL de até dez conexões.
+Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. Adicione também `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` e `DATABASE_SSL` com os dados do MySQL da Hostinger. O processo Express entrega os arquivos do Vite, mantém o Socket.IO ativo e utiliza um pool MySQL de até dez conexões.
 
 ## Qualidade
 

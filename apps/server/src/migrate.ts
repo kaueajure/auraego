@@ -3,13 +3,12 @@ import fs from "node:fs/promises";
 import mysql from "mysql2/promise";
 import { env } from "./config.js";
 
-const url = new URL(env.DATABASE_URL);
 const connection = await mysql.createConnection({
-  host: url.hostname,
-  port: Number(url.port || 3306),
-  user: decodeURIComponent(url.username),
-  password: decodeURIComponent(url.password),
-  database: decodeURIComponent(url.pathname.slice(1)),
+  host: env.DATABASE_HOST,
+  port: env.DATABASE_PORT,
+  user: env.DATABASE_USERNAME,
+  password: env.DATABASE_PASSWORD,
+  database: env.DATABASE_NAME,
   charset: "utf8mb4",
   ssl: env.DATABASE_SSL ? {} : undefined,
   multipleStatements: true
