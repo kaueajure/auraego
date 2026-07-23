@@ -1,8 +1,9 @@
 import type { Server, Socket } from "socket.io";
 import { applyInput, botDecision, createGame, generateEvents, mmrDelta, type ArenaEvent, type BotDifficulty, type GameState, type InputIntent } from "@aura-ego/shared";
-import { prisma } from "./db.js";
 import { verifyAccess } from "./security.js";
 import { env } from "./config.js";
+import { findUserById } from "./repositories/auth-repository.js";
+import { createMatch, finishRankedMatch, finishTrainingMatch, getMatchProfiles, markMatchActive } from "./repositories/match-repository.js";
 
 interface ConnectedUser { id: string; username: string; mmr: number; verified: boolean; region: string }
 interface QueueEntry { socketId: string; user: ConnectedUser; joinedAt: number }
@@ -26,7 +27,7 @@ export function attachRealtime(io: Server) {
   io.use(async (socket, next) => {
     try {
       const claims = verifyAccess(String(socket.handshake.auth.token || ""));
-      const user = await prisma.user.findUnique({ where: { id: claims.sub }, include: { profile: true } });
+      const user = await findUserById(claims.sub, true);
       if (!user?.profile || user.status !== "ACTIVE") throw new Error("unauthorized");
       const connected = { id: user.id, username: user.username, mmr: user.profile.mmr, verified: Boolean(user.emailVerifiedAt), region: String(socket.handshake.auth.region || "sa-east").slice(0, 24) };
       socketUsers.set(socket.id, connected); socket.data.user = connected; next();
@@ -84,8 +85,8 @@ function findMatches(io: Server) {
 
 async function createRankedRoom(io: Server, first: QueueEntry, second: QueueEntry) {
   const seed = Math.floor(Math.random() * 2_000_000_000);
-  const match = await prisma.match.create({ data: { mode: "RANKED", status: "LOADING", seed, participants: { create: [{ userId: first.user.id, mmrBefore: first.user.mmr }, { userId: second.user.id, mmrBefore: second.user.mmr }] } } });
-  const room = makeRoom(match.id, "RANKED", seed, [first.user, second.user]);
+  const matchId = await createMatch("RANKED", seed, [{ userId: first.user.id, mmrBefore: first.user.mmr }, { userId: second.user.id, mmrBefore: second.user.mmr }]);
+  const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
   room.sockets.set(first.user.id, first.socketId); room.sockets.set(second.user.id, second.socketId);
   rooms.set(room.id, room);
   for (const e of [first, second]) { playerRooms.set(e.user.id, room.id); io.sockets.sockets.get(e.socketId)?.join(room.id); }
@@ -98,8 +99,8 @@ async function startTraining(io: Server, socket: Socket, requested?: BotDifficul
   if (playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_PLAYING", message: "Você já está em uma partida." });
   const difficulty: BotDifficulty = ["INICIANTE", "NORMAL", "DIFICIL", "INSANO"].includes(requested || "") ? requested! : "NORMAL";
   const seed = Math.floor(Math.random() * 2_000_000_000);
-  const match = await prisma.match.create({ data: { mode: "TRAINING", status: "LOADING", seed, participants: { create: { userId: user.id, mmrBefore: user.mmr } } } });
-  const room = makeRoom(match.id, "TRAINING", seed, [user, { id: `bot:${match.id}`, username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro", mmr: user.mmr, verified: true, region: user.region }]);
+  const matchId = await createMatch("TRAINING", seed, [{ userId: user.id, mmrBefore: user.mmr }]);
+  const room = makeRoom(matchId, "TRAINING", seed, [user, { id: `bot:${matchId}`, username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro", mmr: user.mmr, verified: true, region: user.region }]);
   room.difficulty = difficulty; room.sockets.set(user.id, socket.id); rooms.set(room.id, room); playerRooms.set(user.id, room.id); socket.join(room.id);
   socket.emit("match:found", { roomId: room.id, players: Object.values(room.state.players).map(p => ({ id: p.id, username: p.username })), seed, training: true, difficulty });
   setTimeout(() => startRoom(io, room), 1200);
@@ -115,7 +116,7 @@ function startRoom(io: Server, room: Room) {
   const now = Date.now();
   room.state.phase = "ROUND_ACTIVE"; room.state.roundEndsAt = now + 45_000;
   room.events = generateEvents(room.state.seed + room.state.round, now, 10); room.eventCursor = 0;
-  void prisma.match.update({ where: { id: room.id }, data: { status: "ACTIVE", startedAt: new Date() } });
+  void markMatchActive(room.id);
   io.to(room.id).emit("match:start", { ...safeState(room), countdownEndedAt: now });
   room.timer = setInterval(() => tickRoom(io, room), 100);
 }
@@ -195,28 +196,20 @@ async function finishRoom(io: Server, room: Room, winnerId: string, reason: stri
   const players = Object.values(room.state.players);
   if (room.mode === "RANKED") {
     const [a, b] = players;
-    const profiles = await prisma.playerProfile.findMany({ where: { userId: { in: [a!.id, b!.id] } } });
+    const profiles = await getMatchProfiles([a!.id, b!.id]);
     const updates = players.map((p, index) => {
       const profile = profiles.find(x => x.userId === p.id)!;
       const opponent = profiles.find(x => x.userId !== p.id)!;
       const won = p.id === winnerId, delta = mmrDelta(profile.mmr, opponent.mmr, won ? 1 : 0, reason === "ABANDON" && !won);
       return { p, profile, won, delta, opponent: players[1 - index]! };
     });
-    await prisma.$transaction([
-      prisma.match.update({ where: { id: room.id }, data: { status: "FINISHED", endedAt: new Date(), winnerId, finishReason: reason } }),
-      ...updates.flatMap(({ p, profile, won, delta }) => [
-        prisma.matchParticipant.update({ where: { matchId_userId: { matchId: room.id, userId: p.id } }, data: { aura: p.aura, remainingEgo: p.ego, highestCombo: p.highestCombo, accuracy: p.totalActions ? p.successfulActions / p.totalActions : 0, perfectActions: p.perfectActions, mistakes: p.mistakes, spamViolations: p.spamViolations, mmrAfter: profile.mmr + delta, result: won ? "WIN" : "LOSS" } }),
-        prisma.playerProfile.update({ where: { userId: p.id }, data: { mmr: profile.mmr + delta, currentRank: rankFor(profile.mmr + delta), totalAura: { increment: p.aura }, experience: profile.experience + (won ? 120 : 60), level: Math.floor((profile.experience + (won ? 120 : 60)) / 500) + 1, wins: won ? { increment: 1 } : undefined, losses: won ? undefined : { increment: 1 }, winStreak: won ? { increment: 1 } : 0 } })
-      ])
-    ]);
+    await finishRankedMatch(room.id, winnerId, reason, updates.map(({ p, profile, won, delta }) => ({
+      player: p, profile, won, delta, rank: rankFor(profile.mmr + delta)
+    })));
     io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room), mmrChanges: Object.fromEntries(updates.map(u => [u.p.id, u.delta])) });
   } else {
     const human = players.find(p => !p.id.startsWith("bot:"))!;
-    await prisma.$transaction([
-      prisma.match.update({ where: { id: room.id }, data: { status: "FINISHED", endedAt: new Date(), winnerId: winnerId === human.id ? human.id : null, finishReason: reason } }),
-      prisma.matchParticipant.update({ where: { matchId_userId: { matchId: room.id, userId: human.id } }, data: { aura: human.aura, remainingEgo: human.ego, highestCombo: human.highestCombo, accuracy: human.totalActions ? human.successfulActions / human.totalActions : 0, perfectActions: human.perfectActions, mistakes: human.mistakes, spamViolations: human.spamViolations, mmrAfter: null, result: winnerId === human.id ? "WIN" : "LOSS" } }),
-      prisma.playerProfile.update({ where: { userId: human.id }, data: { totalAura: { increment: human.aura }, experience: { increment: 35 } } })
-    ]);
+    await finishTrainingMatch(room.id, winnerId, reason, human);
     io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
   }
   setTimeout(() => cleanupRoom(room), 5000);

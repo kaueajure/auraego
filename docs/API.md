@@ -26,6 +26,8 @@ Todas as respostas de erro usam:
 
 Campos desconhecidos no update do perfil são rejeitados. Senha e hashes nunca são serializados.
 
+Todos os dados persistentes são armazenados no MySQL 8 por queries parametrizadas. Nenhum valor fornecido pelo cliente é interpolado diretamente em SQL.
+
 ## WebSocket
 
 Handshake:

@@ -24,7 +24,7 @@ Socket.IO autenticado ──► sala autoritativa ──► engine determinísti
                               dois clientes
                                   │
                                   ▼
-                              PostgreSQL
+                                MySQL
 ```
 
 ## Unidade de deploy
@@ -52,7 +52,9 @@ O servidor gera a linha do tempo usando uma seed. A compensação aplica no máx
 
 ## Dados
 
-A migration cria usuários, perfis, tokens, sessões, partidas, participantes e auditoria. E-mail e username são únicos; perfis têm índice descendente de MMR; tokens, sessões, histórico por usuário e estado de partidas têm índices orientados aos acessos.
+A migration MySQL 8 cria usuários, perfis, tokens, sessões, partidas, participantes e auditoria em tabelas InnoDB com `utf8mb4`. E-mail e username são únicos com comparação case-insensitive; perfis têm índice descendente de MMR; tokens, sessões, histórico por usuário e estado de partidas têm índices orientados aos acessos.
+
+Não há ORM. A aplicação usa `mysql2/promise`, pool limitado, placeholders `?` para todos os valores e transações explícitas para cadastro, rotação de estado, redefinição de senha e persistência do resultado competitivo. A migration fica em `apps/server/migrations/001_initial.sql`.
 
 ## Desempenho e acessibilidade
 

@@ -1,46 +1,97 @@
+import crypto from "node:crypto";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { prisma } from "./db.js";
 import { accessToken, randomToken, refreshToken, sha256, verifyRefresh, type AuthedRequest } from "./security.js";
 import { sendRecovery, sendVerification } from "./email.js";
 import { durationMs, env } from "./config.js";
+import {
+  accountExists, createPendingUser, createRecoveryToken, createSessionAndRecordLogin,
+  createVerificationToken, deleteUser, findRecoveryToken, findSessionWithUser,
+  findUserByEmail, findUserWithLatestVerification, findVerificationToken,
+  recordFailedLogin, resetPassword, revokeSessionByHash, revokeSessionById,
+  rotateSession, verifyEmailToken, type User
+} from "./repositories/auth-repository.js";
 
 export const authRouter = Router();
 const strictLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
-const registerSchema = z.object({ username: z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/), email: z.email().transform(v => v.toLowerCase()), password: z.string().min(8).regex(/[A-Za-z]/).regex(/[0-9]/), confirmPassword: z.string() }).refine(v => v.password === v.confirmPassword, { path: ["confirmPassword"], message: "As senhas não coincidem" });
-const cookie = { httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "lax" as const, path: "/auth", maxAge: 7 * 86400_000 };
-const publicUser = (u: any) => ({ id: u.id, username: u.username, email: u.email, emailVerified: Boolean(u.emailVerifiedAt), profile: { level: u.profile.level, experience: u.profile.experience, totalAura: u.profile.totalAura, mmr: u.profile.mmr, rank: u.profile.currentRank, wins: u.profile.wins, losses: u.profile.losses, winStreak: u.profile.winStreak, tutorialCompleted: u.profile.tutorialCompleted } });
-const requestMeta = (req: AuthedRequest) => ({ userAgent: req.get("user-agent")?.slice(0, 300), ipHash: sha256(`${req.ip}:${env.EMAIL_VERIFICATION_SECRET}`) });
+const registerSchema = z.object({
+  username: z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/),
+  email: z.email().transform(v => v.toLowerCase()),
+  password: z.string().min(8).regex(/[A-Za-z]/).regex(/[0-9]/),
+  confirmPassword: z.string()
+}).refine(v => v.password === v.confirmPassword, { path: ["confirmPassword"], message: "As senhas não coincidem" });
+const cookie = {
+  httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "lax" as const,
+  path: "/auth", maxAge: durationMs(env.JWT_REFRESH_EXPIRES_IN)
+};
+const publicUser = (user: User) => {
+  if (!user.profile) throw new Error("PROFILE_NOT_FOUND");
+  return {
+    id: user.id, username: user.username, email: user.email, emailVerified: Boolean(user.emailVerifiedAt),
+    profile: {
+      level: user.profile.level, experience: user.profile.experience, totalAura: user.profile.totalAura,
+      mmr: user.profile.mmr, rank: user.profile.currentRank, wins: user.profile.wins,
+      losses: user.profile.losses, winStreak: user.profile.winStreak,
+      tutorialCompleted: user.profile.tutorialCompleted
+    }
+  };
+};
+const requestMeta = (req: AuthedRequest) => ({
+  userAgent: req.get("user-agent")?.slice(0, 300),
+  ipHash: sha256(`${req.ip}:${env.EMAIL_VERIFICATION_SECRET}`)
+});
 
 authRouter.post("/register", strictLimit, async (req, res, next) => {
   try {
     const data = registerSchema.parse(req.body);
-    const exists = await prisma.user.findFirst({ where: { OR: [{ email: data.email }, { username: { equals: data.username, mode: "insensitive" } }] } });
-    if (exists) return res.status(409).json({ error: { code: "ACCOUNT_CONFLICT", message: "Não foi possível criar a conta com esses dados." } });
-    const raw = randomToken(), tokenHash = sha256(raw);
-    const user = await prisma.user.create({ data: { username: data.username, email: data.email, passwordHash: await bcrypt.hash(data.password, 12), profile: { create: {} }, verificationTokens: { create: { tokenHash, expiresAt: new Date(Date.now() + durationMs(env.EMAIL_VERIFICATION_EXPIRES_IN)) } } } });
-    try { await sendVerification(user.email, user.username, raw); }
-    catch (error) { await prisma.user.delete({ where: { id: user.id } }); throw error; }
+    if (await accountExists(data.email, data.username)) {
+      return res.status(409).json({ error: { code: "ACCOUNT_CONFLICT", message: "Não foi possível criar a conta com esses dados." } });
+    }
+    const raw = randomToken();
+    const user = await createPendingUser({
+      username: data.username, email: data.email, passwordHash: await bcrypt.hash(data.password, 12),
+      verificationTokenHash: sha256(raw),
+      verificationExpiresAt: new Date(Date.now() + durationMs(env.EMAIL_VERIFICATION_EXPIRES_IN))
+    });
+    try {
+      await sendVerification(user.email, user.username, raw);
+    } catch (error) {
+      await deleteUser(user.id);
+      throw error;
+    }
     res.status(201).json({ message: "Conta criada. Confira seu e-mail para confirmar sua presença." });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (isDuplicateEntry(error)) return res.status(409).json({ error: { code: "ACCOUNT_CONFLICT", message: "Não foi possível criar a conta com esses dados." } });
+    next(error);
+  }
 });
 
 authRouter.post("/login", strictLimit, async (req, res, next) => {
   try {
     const data = z.object({ email: z.email().transform(v => v.toLowerCase()), password: z.string().max(200) }).parse(req.body);
-    const user = await prisma.user.findUnique({ where: { email: data.email }, include: { profile: true } });
-    const valid = user ? await bcrypt.compare(data.password, user.passwordHash) : await bcrypt.compare(data.password, "$2b$12$wJc1gJr2xJxYh7nMYxW3Ou0Jb6o.4uXf89aCoU/W9p3BLuCeO8cFe");
+    const user = await findUserByEmail(data.email, true);
+    const valid = user
+      ? await bcrypt.compare(data.password, user.passwordHash)
+      : await bcrypt.compare(data.password, "$2b$12$wJc1gJr2xJxYh7nMYxW3Ou0Jb6o.4uXf89aCoU/W9p3BLuCeO8cFe");
     if (!user || !valid || !user.profile) {
-      if (user) await prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts: { increment: 1 }, lockedUntil: user.failedLoginAttempts >= 4 ? new Date(Date.now() + 15 * 60_000) : undefined } });
+      if (user) await recordFailedLogin(user);
       return res.status(401).json({ error: { code: "INVALID_CREDENTIALS", message: "E-mail ou senha inválidos." } });
     }
-    if (user.lockedUntil && user.lockedUntil > new Date()) return res.status(429).json({ error: { code: "TEMPORARILY_LOCKED", message: "Muitas tentativas. Aguarde alguns minutos." } });
-    const session = await prisma.session.create({ data: { userId: user.id, refreshTokenHash: "pending", expiresAt: new Date(Date.now() + durationMs(env.JWT_REFRESH_EXPIRES_IN)), ...requestMeta(req) } });
-    const refresh = refreshToken(user.id, session.id);
-    await prisma.$transaction([prisma.session.update({ where: { id: session.id }, data: { refreshTokenHash: sha256(refresh) } }), prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts: 0, lockedUntil: null, lastLoginAt: new Date() } })]);
-    res.cookie("refresh_token", refresh, cookie).json({ accessToken: accessToken(user.id, session.id), user: publicUser(user) });
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      return res.status(429).json({ error: { code: "TEMPORARILY_LOCKED", message: "Muitas tentativas. Aguarde alguns minutos." } });
+    }
+    if (user.status !== "ACTIVE") {
+      return res.status(403).json({ error: { code: "ACCOUNT_UNAVAILABLE", message: "Esta conta não está disponível." } });
+    }
+    const sessionId = crypto.randomUUID();
+    const refresh = refreshToken(user.id, sessionId);
+    await createSessionAndRecordLogin({
+      id: sessionId, userId: user.id, refreshTokenHash: sha256(refresh),
+      expiresAt: new Date(Date.now() + durationMs(env.JWT_REFRESH_EXPIRES_IN)), ...requestMeta(req)
+    });
+    res.cookie("refresh_token", refresh, cookie).json({ accessToken: accessToken(user.id, sessionId), user: publicUser(user) });
   } catch (error) { next(error); }
 });
 
@@ -48,40 +99,52 @@ authRouter.post("/refresh", async (req, res) => {
   try {
     const raw = req.cookies.refresh_token;
     const claims = verifyRefresh(raw);
-    const session = await prisma.session.findUnique({ where: { id: claims.sid }, include: { user: { include: { profile: true } } } });
+    if (!claims.sid) throw new Error("invalid");
+    const session = await findSessionWithUser(claims.sid);
     if (!session || session.revokedAt || session.expiresAt < new Date() || !session.user.profile) throw new Error("invalid");
     if (sha256(raw) !== session.refreshTokenHash) {
-      await prisma.session.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
+      await revokeSessionById(session.id);
       throw new Error("replayed");
     }
     const rotated = refreshToken(session.userId, session.id);
-    await prisma.session.update({ where: { id: session.id }, data: { refreshTokenHash: sha256(rotated) } });
-    res.cookie("refresh_token", rotated, cookie).json({ accessToken: accessToken(session.userId, session.id), user: publicUser(session.user) });
-  } catch { res.clearCookie("refresh_token", cookie).status(401).json({ error: { code: "SESSION_EXPIRED", message: "Sua sessão expirou." } }); }
+    await rotateSession(session.id, sha256(rotated));
+    res.cookie("refresh_token", rotated, cookie).json({
+      accessToken: accessToken(session.userId, session.id), user: publicUser(session.user)
+    });
+  } catch {
+    res.clearCookie("refresh_token", cookie).status(401).json({ error: { code: "SESSION_EXPIRED", message: "Sua sessão expirou." } });
+  }
 });
 
 authRouter.post("/logout", async (req, res) => {
   const raw = req.cookies.refresh_token;
-  if (raw) await prisma.session.updateMany({ where: { refreshTokenHash: sha256(raw), revokedAt: null }, data: { revokedAt: new Date() } });
+  if (raw) await revokeSessionByHash(sha256(raw));
   res.clearCookie("refresh_token", cookie).status(204).end();
 });
 
 authRouter.post("/verify-email", strictLimit, async (req, res) => {
   const { token } = z.object({ token: z.string().min(20).max(200) }).parse(req.body);
-  const record = await prisma.verificationToken.findUnique({ where: { tokenHash: sha256(token) } });
-  if (!record || record.usedAt || record.expiresAt < new Date()) return res.status(400).json({ error: { code: record?.usedAt ? "TOKEN_USED" : record ? "TOKEN_EXPIRED" : "TOKEN_INVALID", message: "Este link é inválido ou expirou." } });
-  await prisma.$transaction([prisma.verificationToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }), prisma.user.update({ where: { id: record.userId }, data: { emailVerifiedAt: new Date() } })]);
+  const record = await findVerificationToken(sha256(token));
+  if (!record || record.usedAt || record.expiresAt < new Date()) {
+    return res.status(400).json({
+      error: {
+        code: record?.usedAt ? "TOKEN_USED" : record ? "TOKEN_EXPIRED" : "TOKEN_INVALID",
+        message: "Este link é inválido ou expirou."
+      }
+    });
+  }
+  await verifyEmailToken(record);
   res.json({ message: "E-mail verificado. Sua presença foi confirmada." });
 });
 
 authRouter.post("/resend-verification", strictLimit, async (req, res) => {
   const { email } = z.object({ email: z.email().transform(v => v.toLowerCase()) }).parse(req.body);
-  const user = await prisma.user.findUnique({ where: { email }, include: { verificationTokens: { orderBy: { createdAt: "desc" }, take: 1 } } });
+  const user = await findUserWithLatestVerification(email);
   if (user && !user.emailVerifiedAt) {
-    const last = user.verificationTokens[0];
+    const last = user.latestVerification;
     if (!last || Date.now() - last.createdAt.getTime() >= 60_000) {
       const raw = randomToken();
-      await prisma.verificationToken.create({ data: { userId: user.id, tokenHash: sha256(raw), expiresAt: new Date(Date.now() + durationMs(env.EMAIL_VERIFICATION_EXPIRES_IN)) } });
+      await createVerificationToken(user.id, sha256(raw), new Date(Date.now() + durationMs(env.EMAIL_VERIFICATION_EXPIRES_IN)));
       await sendVerification(user.email, user.username, raw);
     }
   }
@@ -90,15 +153,27 @@ authRouter.post("/resend-verification", strictLimit, async (req, res) => {
 
 authRouter.post("/forgot-password", strictLimit, async (req, res) => {
   const { email } = z.object({ email: z.email().transform(v => v.toLowerCase()) }).parse(req.body);
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (user) { const raw = randomToken(); await prisma.recoveryToken.create({ data: { userId: user.id, tokenHash: sha256(raw), expiresAt: new Date(Date.now() + 3600_000) } }); await sendRecovery(email, raw); }
+  const user = await findUserByEmail(email);
+  if (user) {
+    const raw = randomToken();
+    await createRecoveryToken(user.id, sha256(raw), new Date(Date.now() + 3_600_000));
+    await sendRecovery(email, raw);
+  }
   res.json({ message: "Se a conta existir, você receberá as instruções." });
 });
 
 authRouter.post("/reset-password", strictLimit, async (req, res) => {
-  const data = z.object({ token: z.string().min(20), password: z.string().min(8).regex(/[A-Za-z]/).regex(/[0-9]/) }).parse(req.body);
-  const record = await prisma.recoveryToken.findUnique({ where: { tokenHash: sha256(data.token) } });
-  if (!record || record.usedAt || record.expiresAt < new Date()) return res.status(400).json({ error: { code: "TOKEN_INVALID", message: "Este link é inválido ou expirou." } });
-  await prisma.$transaction([prisma.recoveryToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }), prisma.user.update({ where: { id: record.userId }, data: { passwordHash: await bcrypt.hash(data.password, 12) } }), prisma.session.updateMany({ where: { userId: record.userId, revokedAt: null }, data: { revokedAt: new Date() } })]);
+  const data = z.object({
+    token: z.string().min(20), password: z.string().min(8).regex(/[A-Za-z]/).regex(/[0-9]/)
+  }).parse(req.body);
+  const record = await findRecoveryToken(sha256(data.token));
+  if (!record || record.usedAt || record.expiresAt < new Date()) {
+    return res.status(400).json({ error: { code: "TOKEN_INVALID", message: "Este link é inválido ou expirou." } });
+  }
+  await resetPassword(record, await bcrypt.hash(data.password, 12));
   res.json({ message: "Senha alterada. Entre novamente." });
 });
+
+function isDuplicateEntry(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ER_DUP_ENTRY";
+}

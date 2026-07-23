@@ -1,6 +1,6 @@
 # Aura & Ego
 
-Jogo competitivo 3D para navegador sobre timing, leitura do adversário e controle de recursos. O código é organizado como monorepo, mas a entrega de produção é uma única aplicação: um processo Express serve o frontend React/Three.js compilado, a API e as salas Socket.IO autoritativas no mesmo domínio e porta.
+Jogo competitivo 3D para navegador sobre timing, leitura do adversário e controle de recursos. O código é organizado como monorepo, mas a entrega de produção é uma única aplicação: um processo Express serve o frontend React/Three.js compilado, a API, o acesso MySQL e as salas Socket.IO autoritativas no mesmo domínio e porta.
 
 ## Arquitetura
 
@@ -12,10 +12,11 @@ apps/
     src/api.ts          cliente HTTP autenticado
     src/socket.ts       transporte em tempo real
     src/store.ts        estado local efêmero da partida
-  server/               Express, Socket.IO, Prisma e PostgreSQL
-    prisma/             schema e migration SQL inicial
+  server/               Express, Socket.IO e mysql2
+    migrations/         migration SQL MySQL 8
     src/auth.ts         cadastro, login, tokens e recuperação
     src/realtime.ts     fila, salas, bot, reconexão e persistência
+    src/repositories/   queries parametrizadas e transações
     src/security.ts     JWT, hashing auxiliar e middleware
     src/email.ts        templates e transporte SMTP
     src/users.ts        perfil, histórico e ranking
@@ -31,15 +32,17 @@ O backend é a fonte de verdade nas partidas. O cliente envia apenas `input`, ti
 ## Pré-requisitos
 
 - Node.js 22+
-- PostgreSQL 15+
+- MySQL 8+
 - uma conta SMTP que aceite autenticação por usuário/senha
 
 ## Configuração local
 
-1. Crie o banco:
+1. Crie o banco MySQL:
 
    ```sql
-   CREATE DATABASE aura_ego;
+   CREATE DATABASE aura_ego
+     CHARACTER SET utf8mb4
+     COLLATE utf8mb4_0900_ai_ci;
    ```
 
 2. Copie `.env.example` para `.env` e preencha todos os campos. Gere três segredos independentes:
@@ -48,15 +51,21 @@ O backend é a fonte de verdade nas partidas. O cliente envia apenas `input`, ti
    openssl rand -base64 48
    ```
 
-3. Configure `DATABASE_URL` com o usuário, senha, host, porta e banco corretos.
+3. Configure `DATABASE_URL` com as credenciais exibidas em **hPanel → Bancos de dados → Gerenciamento**:
+
+   ```env
+   DATABASE_URL=mysql://usuario:senha@host:3306/aura_ego
+   DATABASE_SSL=false
+   ```
+
+   Caso a senha contenha `@`, `:`, `/`, `#` ou outros caracteres reservados de URL, codifique-a com percent-encoding.
 
 4. Configure SMTP. Em desenvolvimento, Mailpit ou MailHog podem ser usados com host local e sem TLS; em produção, use as credenciais do provedor, `SMTP_SECURE=true` para porta 465 ou a configuração recomendada pelo serviço.
 
-5. Instale, gere o cliente e aplique as migrations:
+5. Instale e aplique a migration:
 
    ```bash
    npm install
-   npm run db:generate
    npm run db:migrate
    ```
 
@@ -70,7 +79,7 @@ Frontend: `http://localhost:5173`. Backend: `http://localhost:3000`.
 
 ## Variáveis
 
-Todas estão documentadas em [.env.example](.env.example). São obrigatórias: origens do frontend/backend, `DATABASE_URL`, os dois segredos JWT, o segredo de verificação, todos os campos SMTP e a origem Socket.IO. O servidor valida a configuração antes de abrir a porta e informa apenas os nomes inválidos, nunca valores.
+Todas estão documentadas em [.env.example](.env.example). São obrigatórias: origens do frontend/backend, `DATABASE_URL` iniciada por `mysql://`, os dois segredos JWT, o segredo de verificação, todos os campos SMTP e a origem Socket.IO. O servidor valida a configuração e testa a conexão MySQL antes de abrir a porta. Ele informa apenas os nomes inválidos, nunca valores.
 
 Em produção:
 
@@ -78,7 +87,7 @@ Em produção:
 - mantenha frontend e backend sob origens explícitas;
 - troque os três segredos por valores aleatórios diferentes;
 - configure `NODE_ENV=production` para cookies `Secure`;
-- execute `prisma migrate deploy` no processo de release;
+- execute `npm run db:migrate` uma vez antes do primeiro start e após novas migrations;
 - use um adaptador Socket.IO compartilhado (Redis) antes de escalar para mais de uma instância.
 
 ## Deploy único na Hostinger
@@ -88,11 +97,11 @@ Crie somente uma **Node.js Web App** e selecione **Express**.
 ```text
 Build command: npm run build
 Start command: npm start
-Entry file (se solicitado): apps/server/dist/index.js
+Entry file: deixe vazio (a Hostinger detecta pelo `main` do package.json)
 Node.js: 22
 ```
 
-Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. O processo Express entrega os arquivos do Vite e mantém o Socket.IO ativo.
+Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. Adicione também a `DATABASE_URL` fornecida pelo MySQL da Hostinger. O processo Express entrega os arquivos do Vite, mantém o Socket.IO ativo e utiliza um pool MySQL de até dez conexões.
 
 ## Qualidade
 
@@ -103,7 +112,7 @@ npm run test
 npm run build
 ```
 
-Os testes determinísticos cobrem ordem 6→7, pacotes duplicados, spam, seed de eventos, atraso do bot e MMR. Fluxos que dependem de PostgreSQL e SMTP devem rodar em CI com serviços reais de teste; não há fallback que finja envio de e-mail.
+Os testes determinísticos cobrem ordem 6→7, pacotes duplicados, spam, seed de eventos, atraso do bot e MMR. Fluxos que dependem de MySQL e SMTP devem rodar em CI com serviços reais de teste; não há fallback que finja envio de e-mail.
 
 ## Mecânica
 
@@ -118,15 +127,15 @@ Os testes determinísticos cobrem ordem 6→7, pacotes duplicados, spam, seed de
 ## Limitações conhecidas
 
 - Personagens e sons são originais/procedurais, mas os modelos GLB finais e a trilha não estão incluídos; a cena não depende deles para funcionar.
-- Salas e fila estão em memória de uma instância. PostgreSQL persiste resultados; Redis será necessário para alta disponibilidade horizontal.
+- Salas e fila estão em memória de uma instância. MySQL persiste resultados; Redis será necessário para alta disponibilidade horizontal.
 - O histórico de auditoria foi modelado, porém o MVP persiste o resumo final e não todos os inputs.
 - Termos e política aparecem no cadastro, mas o conteúdo jurídico final precisa ser fornecido antes de produção.
 - Configuração de cosméticos, áudio e gráficos está modelada; a interface completa de edição é um próximo passo.
-- E2E com dois navegadores, PostgreSQL e SMTP não é executável sem esses serviços externos configurados.
+- E2E com dois navegadores, MySQL e SMTP não é executável sem esses serviços externos configurados.
 
 ## Próximos passos
 
-1. Adicionar suíte Playwright com dois contexts e containers PostgreSQL/Mailpit.
+1. Adicionar suíte Playwright com dois contexts e containers MySQL/Mailpit.
 2. Adicionar Redis adapter, presença distribuída e idempotência de persistência.
 3. Substituir personagens procedurais por GLB originais comprimidos com Draco/KTX2.
 4. Produzir áudio original e disponibilizar legendas visuais equivalentes.

@@ -136,8 +136,8 @@ Utilize preferencialmente:
 * TypeScript;
 * NestJS ou Express com arquitetura modular;
 * Socket.IO para comunicação em tempo real;
-* PostgreSQL;
-* Prisma ORM;
+* MySQL 8;
+* `mysql2` com queries parametrizadas e transações explícitas;
 * JWT com access token e refresh token;
 * bcrypt ou Argon2 para senhas;
 * Nodemailer ou biblioteca equivalente para envio de e-mails;
@@ -169,7 +169,8 @@ PORT=3000
 FRONTEND_URL=http://localhost:5173
 BACKEND_URL=http://localhost:3000
 
-DATABASE_URL=postgresql://usuario:senha@localhost:5432/aura_ego
+DATABASE_URL=mysql://usuario:senha@localhost:3306/aura_ego
+DATABASE_SSL=false
 
 JWT_ACCESS_SECRET=
 JWT_REFRESH_SECRET=
@@ -1584,7 +1585,7 @@ Ao concluir, apresente:
 * tecnologias escolhidas;
 * migrations criadas;
 * variáveis necessárias na `.env`;
-* instruções para configurar PostgreSQL;
+* instruções para configurar MySQL;
 * instruções para configurar SMTP;
 * instruções para executar frontend e backend;
 * instruções para rodar testes;
