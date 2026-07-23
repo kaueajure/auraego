@@ -103,10 +103,10 @@ Entry file: app.js
 Node.js: 22
 ```
 
-O `postinstall` também executa o build completo. Isso garante que
-`apps/server/dist/index.js`, `packages/shared/dist` e `apps/web/dist` existam
-antes de a Hostinger carregar `app.js`, inclusive quando o painel executa
-somente a instalação automática de dependências.
+A Hostinger deve executar a instalação e o build em fases separadas. Não há
+`postinstall`: após concluir `npm install`, o painel deve executar
+`npm run build`. Esse comando gera `apps/server/dist/index.js`,
+`packages/shared/dist` e `apps/web/dist` antes de carregar `app.js`.
 
 Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. Adicione também `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` e `DATABASE_SSL` com os dados do MySQL da Hostinger. O processo Express entrega os arquivos do Vite, mantém o Socket.IO ativo e utiliza um pool MySQL de até dez conexões.
 
