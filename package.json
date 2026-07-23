@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "main": "apps/server/dist/index.js",
+  "main": "app.js",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "npm run build -w @aura-ego/shared && concurrently -n server,web -c yellow,cyan \"npm run dev -w @aura-ego/server\" \"npm run dev -w @aura-ego/web\"",

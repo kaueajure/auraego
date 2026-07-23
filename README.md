@@ -99,7 +99,7 @@ Crie somente uma **Node.js Web App** e selecione **Express**.
 ```text
 Build command: npm run build
 Start command: npm start
-Entry file: deixe vazio (a Hostinger detecta pelo `main` do package.json)
+Entry file: app.js
 Node.js: 22
 ```
 
