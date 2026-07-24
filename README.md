@@ -96,18 +96,34 @@ Em produção:
 
 Crie somente uma **Node.js Web App** e selecione **Express**.
 
+No painel (Build settings), use exatamente:
+
 ```text
+Node.js: 22
+Package manager: npm
+Install command: npm install
 Build command: npm run build
 Start command: npm start
 Entry file: app.js
-Node.js: 22
 ```
 
-A Hostinger deve executar a instalação e o build em fases separadas. Não há
-`postinstall`: após concluir `npm install`, o painel deve executar
-`npm run build`. Esse comando gera `server.bundle.cjs` e `public/` diretamente
-na raiz do runtime antes de carregar `app.js`. O bundle inclui a engine
-compartilhada e mantém apenas dependências npm como externas.
+Variáveis extras recomendadas:
+
+```text
+NODE_ENV=production
+HOSTINGER=1
+```
+
+Fluxo automático:
+
+1. Hostinger roda `npm install` (dependências).
+2. `postinstall` também dispara o build se `HOSTINGER=1` ou `NODE_ENV=production`.
+3. O Build command `npm run build` regenera `public/` + `server.bundle.cjs` (mesmo se o postinstall já tiver rodado).
+4. `npm start` sobe `app.js` (bundle de produção).
+
+Localmente o `postinstall` **não** rebuilda (fica rápido). Para forçar:
+`FORCE_POSTINSTALL_BUILD=1 npm install`. Para pular sempre:
+`SKIP_POSTINSTALL_BUILD=1 npm install`.
 
 Os artefatos raiz `server.bundle.cjs` e `public/` são
 intencionalmente versionados. A hospedagem Express da Hostinger pode recriar o

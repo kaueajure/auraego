@@ -13,9 +13,10 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "postinstall": "node scripts/postinstall-build.mjs",
     "build": "npm run build -w @aura-ego/shared && npm run build -w @aura-ego/server && VITE_API_URL= VITE_SOCKET_URL= npm run build -w @aura-ego/web && npm run build:bundle",
     "build:bundle": "node scripts/build-hostinger.mjs",
-    "start": "npm start -w @aura-ego/server",
+    "start": "node app.js",
     "db:migrate": "npm run db:migrate -w @aura-ego/server"
   },
   "devDependencies": {
