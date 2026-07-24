@@ -1,1 +1,0 @@
-const A={SEM_PRESENCA:"Sem Presença",EGO_FRAGIL:"Ego Frágil",AURA_QUESTIONAVEL:"Aura Questionável",FARMER_DE_AURA:"Farmer de Aura",SIX_SEVEN_CERTIFICADO:"Six Seven Certificado",PRESENCA_DOMINANTE:"Presença Dominante",EGO_INABALAVEL:"Ego Inabalável",AURA_LENDARIA:"Aura Lendária"};export{A as R};
