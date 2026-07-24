@@ -1,1 +1,0 @@
-import{j as s}from"./index-BAbFDuTb.js";function r({compact:o=!1}){return s.jsxs("div",{className:`logo ${o?"logo--compact":""}`,"aria-label":"Aura e Ego",children:[s.jsx("span",{children:"AURA"}),s.jsx("i",{children:"&"}),s.jsx("span",{children:"EGO"})]})}export{r as L};

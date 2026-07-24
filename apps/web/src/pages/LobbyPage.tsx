@@ -48,7 +48,9 @@ export function LobbyPage() {
             ? "PEDIDO 67 • SIX SEVEN"
             : equippedLook.type === "simao"
               ? "OESTE • PÓ NA QUADRA"
-              : "QUADRA DO BAIRRO • FIM DE TARDE";
+              : equippedLook.type === "model212"
+                ? "STREET • 212"
+                : "QUADRA DO BAIRRO • FIM DE TARDE";
   const socket = gameSocket();
   useEffect(() => {
     const found = (payload: any) => { game.setRoom(payload.roomId); game.setStatus("FOUND"); navigate("/partida"); };

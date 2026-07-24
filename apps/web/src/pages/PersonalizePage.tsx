@@ -29,6 +29,7 @@ function lookBadge(type: string) {
   if (type === "cj") return "CJ";
   if (type === "order67") return "67";
   if (type === "simao") return "JS";
+  if (type === "model212") return "212";
   return "A&E";
 }
 

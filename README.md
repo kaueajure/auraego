@@ -114,6 +114,10 @@ NODE_ENV=production
 HOSTINGER=1
 ```
 
+**Importante:** ferramentas de build (`typescript`, `vite`, `esbuild`) estão em
+`dependencies` (não só em `devDependencies`) para o install da Hostinger com
+`NODE_ENV=production` ainda conseguir rodar `npm run build` / `postinstall`.
+
 Fluxo automático:
 
 1. Hostinger roda `npm install` (dependências).

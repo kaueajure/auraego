@@ -3,7 +3,7 @@ export interface WardrobeLook {
   name: string;
   collection: string;
   description: string;
-  type: "emi" | "charlie" | "phil" | "classic" | "banana" | "cj" | "order67" | "simao";
+  type: "emi" | "charlie" | "phil" | "classic" | "banana" | "cj" | "order67" | "simao" | "model212";
   rarity: "Lendária" | "Épica" | "Rara";
   color: string;
   accent: string;
@@ -123,6 +123,21 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     pants: "#3d4a5c",
     shoes: "#1a120e",
     swatches: ["#8b5a2b", "#c4a35a", "#3d4a5c"]
+  },
+  {
+    id: "look-212",
+    name: "212",
+    collection: "Street",
+    description: "Presença seca, postura de quem já chegou e farm de aura sem pedir licença.",
+    type: "model212",
+    rarity: "Lendária",
+    color: "#2c2c2c",
+    accent: "#c0c0c0",
+    skin: "#c49a7a",
+    hair: "#1a1a1a",
+    pants: "#1e2430",
+    shoes: "#111111",
+    swatches: ["#2c2c2c", "#c0c0c0", "#1e2430"]
   },
   {
     id: "meia-noite",

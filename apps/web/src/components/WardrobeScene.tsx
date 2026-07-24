@@ -667,14 +667,24 @@ function RiggedAvatarModel({ modelUrl, rigNames, action = "idle", chadMode = fal
   return <primitive object={model} />;
 }
 
-/** Simão: skeleton Tripo (Y no osso, sem dedos). IK genérico estoura a pose — Euler local. */
-function SimaoModel({ action = "idle", chadMode = false }: { action?: CharacterAction; chadMode?: boolean }) {
-  const { scene } = useGLTF("/models/simao.glb");
+/** Humanoides Tripo (Y no osso, sem dedos): Six/Seven por Euler local — igual ao Jack Simon. */
+function TripoEulerModel({
+  modelUrl,
+  label,
+  action = "idle",
+  chadMode = false
+}: {
+  modelUrl: string;
+  label: string;
+  action?: CharacterAction;
+  chadMode?: boolean;
+}) {
+  const { scene } = useGLTF(modelUrl);
   const model = useMemo(() => prepareRiggedClone(scene as Group, 1.72), [scene]);
   const rig = useMemo(() => {
     const bone = (name: string) => {
       const target = model.getObjectByName(name) as Bone | undefined;
-      if (!target) throw new Error(`Simão: osso ausente ${name}`);
+      if (!target) throw new Error(`${label}: osso ausente ${name}`);
       return { bone: target, base: target.quaternion.clone() };
     };
     return {
@@ -696,7 +706,7 @@ function SimaoModel({ action = "idle", chadMode = false }: { action?: CharacterA
       rightFoot: bone("R_Foot"),
       baseModelY: model.position.y
     };
-  }, [model]);
+  }, [label, model]);
 
   const poseWeight = useRef(0);
   const chinWeight = useRef(0);
@@ -819,7 +829,6 @@ function SimaoModel({ action = "idle", chadMode = false }: { action?: CharacterA
       -weightShift * (.05 + .06 * energy)
     );
 
-    // Coxa / joelho / pé — sempre vivos no idle e no gesto.
     const leftLift = gestureInMotion ? Math.max(0, -weightShift) : Math.max(0, -idleBob);
     const rightLift = gestureInMotion ? Math.max(0, weightShift) : Math.max(0, idleBob);
     setLocal(
@@ -1071,7 +1080,13 @@ export function PlayerLookModel({
 
   if (look.type === "simao") {
     return <group position={position} rotation-y={facing} scale={scale}>
-      <SimaoModel action={action} chadMode={chadMode} />
+      <TripoEulerModel modelUrl="/models/simao.glb" label="Jack Simon" action={action} chadMode={chadMode} />
+    </group>;
+  }
+
+  if (look.type === "model212") {
+    return <group position={position} rotation-y={facing} scale={scale}>
+      <TripoEulerModel modelUrl="/models/model-212.glb" label="212" action={action} chadMode={chadMode} />
     </group>;
   }
 
@@ -1144,4 +1159,5 @@ useGLTF.preload("/models/banana.glb");
 useGLTF.preload("/models/cj.glb");
 useGLTF.preload("/models/order-67.glb");
 useGLTF.preload("/models/simao.glb");
+useGLTF.preload("/models/model-212.glb");
 

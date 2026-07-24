@@ -160,7 +160,7 @@ export function LobbyShowcaseScene({ look, pose, cosmetics }: {
   pose: CharacterAction;
   cosmetics?: Record<string, string> | null;
 }) {
-  const variant: ArenaVariant = look.type === "phil" ? 2 : look.type === "charlie" || look.type === "banana" || look.type === "cj" || look.type === "order67" || look.type === "simao" ? 1 : 0;
+  const variant: ArenaVariant = look.type === "phil" ? 2 : look.type === "charlie" || look.type === "banana" || look.type === "cj" || look.type === "order67" || look.type === "simao" || look.type === "model212" ? 1 : 0;
   const arena = ARENAS[variant];
   return <Canvas shadows dpr={[1, 1.65]} camera={{ position: [0, 2.35, 6.15], fov: 38 }}>
     <CameraTarget y={1.12} />
