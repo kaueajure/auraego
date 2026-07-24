@@ -118,6 +118,10 @@ HOSTINGER=1
 `dependencies` (não só em `devDependencies`) para o install da Hostinger com
 `NODE_ENV=production` ainda conseguir rodar `npm run build` / `postinstall`.
 
+`public/assets`, `public/index.html`, `public/models` e `server.bundle.cjs`
+**não** vão no Git — são gerados no deploy. A fonte dos GLBs é
+`apps/web/public/models/`.
+
 Fluxo automático:
 
 1. Hostinger roda `npm install` (dependências).
@@ -129,11 +133,12 @@ Localmente o `postinstall` **não** rebuilda (fica rápido). Para forçar:
 `FORCE_POSTINSTALL_BUILD=1 npm install`. Para pular sempre:
 `SKIP_POSTINSTALL_BUILD=1 npm install`.
 
-Os artefatos raiz `server.bundle.cjs` e `public/` são
-intencionalmente versionados. A hospedagem Express da Hostinger pode recriar o
-diretório de runtime apenas com arquivos do repositório; versioná-los impede
-que o entrypoint seja publicado sem o bundle e evita erros de módulo no
-runtime. `app.js` e o bundle usam CommonJS porque o LiteSpeed `lsnode.js` da
+Os artefatos `server.bundle.cjs` e `public/` são gerados por `npm run build`
+no deploy. Não versionamos JS/CSS com hash nem o bundle — isso evita subir
+build velho misturado com código novo. A Hostinger precisa ter
+`Build command: npm run build` (ou `HOSTINGER=1` no postinstall).
+
+`app.js` e o bundle usam CommonJS porque o LiteSpeed `lsnode.js` da
 Hostinger carrega o entrypoint com `require()`.
 
 Defina `FRONTEND_URL`, `BACKEND_URL` e `SOCKET_CORS_ORIGIN` com o mesmo domínio HTTPS. Não defina `VITE_API_URL` nem `VITE_SOCKET_URL` em produção: assim o navegador usa automaticamente o mesmo domínio. Adicione também `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` e `DATABASE_SSL` com os dados do MySQL da Hostinger. O processo Express entrega os arquivos do Vite, mantém o Socket.IO ativo e utiliza um pool MySQL de até dez conexões.
