@@ -7,3 +7,11 @@ coverage
 *.log
 .DS_Store
 apps/server/generated
+
+# Build de produção (Hostinger gera com `npm run build`)
+# Fonte dos modelos: apps/web/public/models/
+public/assets/
+public/index.html
+public/models/
+server.bundle.cjs
+*.tsbuildinfo
