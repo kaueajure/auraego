@@ -2,7 +2,7 @@
 
 ## Pesquisa cultural aplicada
 
-A referência cultural foi usada como linguagem, não como conteúdo. O gesto foi abstraído como alternância rítmica das mãos, e a relação com basquete inspirou a quadra urbana. “Aura” é uma pontuação humorística de presença; “aura farming” é recompensado somente quando a ação parece adequada ao contexto; agir de modo forçado causa perda de ego. Não são usados música, vídeos, pessoas, marcas, modelos ou falas do material original.
+A referência cultural foi usada como linguagem, não como conteúdo. O gesto foi abstraído como alternância rítmica das mãos, e a relação com basquete inspirou a quadra urbana. “Aura” é uma pontuação humorística de presença; “aura farming” é recompensado pela alternância rápida e correta entre 6 e 7. Não são usados música, vídeos, pessoas, marcas, modelos ou falas do material original.
 
 Fontes consultadas em 23 de julho de 2026:
 
@@ -19,7 +19,7 @@ teclado/toque
 Socket.IO autenticado ──► sala autoritativa ──► engine determinística
                                   │                      │
                                   │ estado oficial       ├─ aura/ego/combo
-                                  │                      ├─ spam/janelas
+                                  │                      ├─ ordem/ritmo
                                   ▼                      └─ vitória/MMR
                               dois clientes
                                   │
@@ -31,13 +31,13 @@ Socket.IO autenticado ──► sala autoritativa ──► engine determinísti
 
 Frontend, API e Socket.IO são publicados como um único serviço. O build preserva módulos separados no repositório, mas o processo Express de produção serve `apps/web/dist`, responde às rotas HTTP e mantém as conexões WebSocket. Isso elimina CORS entre frontend/backend e exige apenas uma aplicação na hospedagem.
 
-O cliente nunca envia pontos, ego, multiplicador, vencedor, estado do rival ou relógio oficial. Sequências repetidas ou regressivas, timestamps fora de cinco segundos, frequência excessiva e inputs fora do estado ativo são rejeitados.
+O cliente nunca envia pontos, ego, multiplicador, vencedor, estado do rival ou relógio oficial. Sequências repetidas ou regressivas, timestamps fora de cinco segundos, velocidade fisicamente impossível e inputs fora do estado ativo são rejeitados.
 
 ## Estado e eventos
 
-A engine representa `COUNTDOWN`, `ROUND_ACTIVE`, `ROUND_ENDING`, `INTERMISSION` e `FINISHED`. A camada de sala representa ainda carregamento, fila e reconexão. Eventos têm identificador, tipo, duração, janelas normal/perfeita, risco, recompensa, penalidade, ação/animação/som semântico, regra do bot e condição de ativação.
+A engine representa `COUNTDOWN`, `ROUND_ACTIVE`, `ROUND_ENDING`, `INTERMISSION` e `FINISHED`. A camada de sala representa ainda carregamento, fila e reconexão. O loop principal recompensa alternância rápida `6 → 7`: cada par alimenta o combo, a Aura sobe a cada três pares e o Ego a cada cinco. Eventos têm identificador, tipo, duração e apresentação semântica, mas não interrompem o farming contínuo.
 
-O servidor gera a linha do tempo usando uma seed. A compensação aplica no máximo 150 ms sobre metade da estimativa de latência. Isso reduz injustiça moderada sem permitir que conexões lentas ampliem a janela indefinidamente.
+O servidor gera a linha do tempo visual usando uma seed e valida ordem, sequência, timestamp e intervalo de cada par. A proteção de velocidade aceita ritmo humano agressivo e rejeita somente intervalos fisicamente impossíveis.
 
 ## Autenticação
 

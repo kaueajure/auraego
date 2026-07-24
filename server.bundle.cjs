@@ -650,12 +650,14 @@ app.use(errors);
 // packages/shared/src/game.ts
 var GAME_CONFIG = {
   maxEgo: 100,
-  pairMinMs: 70,
-  pairMaxMs: 650,
-  idealPairMs: 230,
+  pairMinMs: 30,
+  pairMaxMs: 450,
+  idealPairMs: 140,
+  auraPairsPerPoint: 3,
+  egoPairsPerPoint: 5,
   spamWindowMs: 1500,
-  spamLimit: 8,
-  actionLockMs: 900,
+  spamLimit: 60,
+  actionLockMs: 0,
   roundDurationMs: 45e3,
   roundsToWin: 2,
   latencyCapMs: 150
@@ -675,7 +677,7 @@ var createPlayer = (id, username) => ({
   id,
   username,
   aura: 0,
-  ego: 100,
+  ego: 0,
   combo: 0,
   multiplier: 1,
   lastInputAt: 0,
@@ -722,19 +724,14 @@ function createGame(seed, players, now) {
     version: 1
   };
 }
-function fail(player, evaluation, egoLoss, now, reason) {
-  player.ego = Math.max(0, player.ego - egoLoss);
+function fail(player, evaluation, reason) {
+  player.pendingSixAt = null;
   player.combo = 0;
   player.multiplier = 1;
   player.mistakes++;
-  if (player.ego === 0) {
-    player.egoBrokenUntil = now + 4e3;
-    player.ego = 25;
-    evaluation = "EGO_DESTRUIDO";
-  }
-  return { accepted: true, evaluation, auraDelta: 0, egoDelta: -egoLoss, combo: 0, reason };
+  return { accepted: true, evaluation, auraDelta: 0, egoDelta: 0, combo: 0, reason };
 }
-function applyInput(state, intent, serverNow, estimatedLatency = 0) {
+function applyInput(state, intent, serverNow, _estimatedLatency = 0) {
   const player = state.players[intent.playerId];
   if (!player || state.phase !== "ROUND_ACTIVE") return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player?.combo ?? 0, reason: "STATE" };
   if (!Number.isInteger(intent.sequence) || intent.sequence <= player.lastSequence) return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "SEQUENCE" };
@@ -743,60 +740,54 @@ function applyInput(state, intent, serverNow, estimatedLatency = 0) {
   player.inputTimes = [...player.inputTimes.filter((t) => serverNow - t <= GAME_CONFIG.spamWindowMs), serverNow];
   if (player.inputTimes.length > GAME_CONFIG.spamLimit) {
     player.spamViolations++;
-    player.aura = Math.max(0, player.aura - 8);
-    return fail(player, "FORCADO", 12, serverNow, "SPAM");
+    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_RATE" };
   }
-  if (serverNow < player.egoBrokenUntil) return { accepted: false, evaluation: "SEM_AURA", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "EGO_BROKEN" };
   player.lastInputAt = serverNow;
   if (intent.input === "SIX") {
+    if (player.pendingSixAt !== null) return fail(player, "ERROU", "ORDER");
     player.pendingSixAt = serverNow;
     return { accepted: true, evaluation: "SEM_AURA", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "PAIR_PENDING" };
   }
   player.totalActions++;
-  if (player.pendingSixAt === null) return fail(player, "ERROU", 8, serverNow, "ORDER");
+  if (player.pendingSixAt === null) return fail(player, "ERROU", "ORDER");
   const pairGap = serverNow - player.pendingSixAt;
   player.pendingSixAt = null;
-  if (pairGap < GAME_CONFIG.pairMinMs || pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", 7, serverNow, "PAIR_TIMING");
-  const event = state.currentEvent;
-  if (!event) {
-    player.aura = Math.max(0, player.aura - 5);
-    return fail(player, "FORCADO", 9, serverNow, "NO_EVENT");
+  if (pairGap < GAME_CONFIG.pairMinMs) {
+    player.spamViolations++;
+    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_SPEED" };
   }
-  const compensatedNow = serverNow - Math.min(Math.max(estimatedLatency / 2, 0), GAME_CONFIG.latencyCapMs);
-  const offset = compensatedNow - event.startsAt;
-  if (!event.shouldAct && offset < event.hitWindow[0]) {
-    player.aura = Math.max(0, player.aura - event.penalty);
-    return fail(player, "FORCADO", event.penalty, serverNow, "TRAP");
-  }
-  if (offset < event.hitWindow[0] || offset > event.hitWindow[1]) return fail(player, "FORA_DO_RITMO", event.penalty, serverNow, "EVENT_TIMING");
-  const perfect = offset >= event.perfectWindow[0] && offset <= event.perfectWindow[1] && Math.abs(pairGap - GAME_CONFIG.idealPairMs) < 100;
+  if (pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", "PAIR_TIMING");
+  const perfect = pairGap <= GAME_CONFIG.idealPairMs;
   player.combo++;
   player.highestCombo = Math.max(player.highestCombo, player.combo);
-  player.multiplier = Math.min(2.5, 1 + player.combo * 0.15);
-  const brokenFactor = serverNow < player.egoBrokenUntil ? 0.5 : 1;
-  const gain = Math.round(event.reward * player.multiplier * brokenFactor * (perfect ? 1.5 : 1));
-  player.aura += gain;
+  player.multiplier = 1;
   player.successfulActions++;
+  const auraGain = player.successfulActions % GAME_CONFIG.auraPairsPerPoint === 0 ? 1 : 0;
+  const egoStep = player.successfulActions % GAME_CONFIG.egoPairsPerPoint === 0 ? 1 : 0;
+  const nextEgo = Math.min(GAME_CONFIG.maxEgo, player.ego + egoStep);
+  const egoGain = nextEgo - player.ego;
+  player.aura += auraGain;
+  player.ego = nextEgo;
   if (perfect) player.perfectActions++;
-  const evaluation = perfect ? player.combo >= 6 ? "AURA_LENDARIA" : "SIX_SEVEN_PERFEITO" : player.combo >= 4 ? "AURA_FARM" : "LIMPO";
-  return { accepted: true, evaluation, auraDelta: gain, egoDelta: 0, combo: player.combo };
+  const evaluation = player.combo >= 25 ? "AURA_LENDARIA" : player.combo >= 8 ? "AURA_FARM" : perfect ? "SIX_SEVEN_PERFEITO" : "LIMPO";
+  return { accepted: true, evaluation, auraDelta: auraGain, egoDelta: egoGain, combo: player.combo, reason: auraGain || egoGain ? void 0 : "FARM_PROGRESS" };
 }
 function mmrDelta(playerMmr, opponentMmr, score, abandoned = false) {
   const expected = 1 / (1 + Math.pow(10, (opponentMmr - playerMmr) / 400));
   return Math.round(32 * (score - expected) - (abandoned ? 8 : 0));
 }
 var BOT_PROFILES = {
-  INICIANTE: { reaction: [900, 1500], accuracy: 0.55, trapSense: 0.45 },
-  NORMAL: { reaction: [600, 1100], accuracy: 0.72, trapSense: 0.7 },
-  DIFICIL: { reaction: [380, 760], accuracy: 0.86, trapSense: 0.86 },
-  INSANO: { reaction: [260, 580], accuracy: 0.93, trapSense: 0.94 }
+  INICIANTE: { cycle: [620, 820], pairGap: [260, 380], accuracy: 0.68 },
+  NORMAL: { cycle: [430, 620], pairGap: [170, 280], accuracy: 0.8 },
+  DIFICIL: { cycle: [290, 430], pairGap: [90, 190], accuracy: 0.9 },
+  INSANO: { cycle: [190, 300], pairGap: [55, 135], accuracy: 0.96 }
 };
 function botDecision(event, difficulty, seed) {
   const profile = BOT_PROFILES[difficulty], random = mulberry32(seed + event.id * 67);
-  const understandsTrap = random() < profile.trapSense;
-  const act = event.shouldAct ? random() < profile.accuracy : !understandsTrap;
-  const delay = profile.reaction[0] + random() * (profile.reaction[1] - profile.reaction[0]);
-  return { act, delay: Math.round(delay), pairGap: Math.round(180 + random() * 180) };
+  const act = random() < profile.accuracy;
+  const delay = profile.cycle[0] + random() * (profile.cycle[1] - profile.cycle[0]);
+  const pairGap = profile.pairGap[0] + random() * (profile.pairGap[1] - profile.pairGap[0]);
+  return { act, delay: Math.round(delay), pairGap: Math.round(pairGap) };
 }
 
 // apps/server/src/repositories/match-repository.ts
@@ -1020,7 +1011,7 @@ async function startTraining(io2, socket, requested) {
 function makeRoom(id, mode, seed, users) {
   const now = Date.now();
   return { id, mode, state: createGame(seed, users, now), events: [], sockets: /* @__PURE__ */ new Map(), eventCursor: 0, timer: setInterval(() => {
-  }, 6e4), disconnected: /* @__PURE__ */ new Map(), ending: false };
+  }, 6e4), nextBotActionAt: now, disconnected: /* @__PURE__ */ new Map(), ending: false };
 }
 function startRoom(io2, room) {
   clearInterval(room.timer);
@@ -1029,22 +1020,22 @@ function startRoom(io2, room) {
   room.state.roundEndsAt = now + 45e3;
   room.events = generateEvents(room.state.seed + room.state.round, now, 10);
   room.eventCursor = 0;
+  room.nextBotActionAt = now + 500;
   void markMatchActive(room.id);
   io2.to(room.id).emit("match:start", { ...safeState(room), countdownEndedAt: now });
   room.timer = setInterval(() => tickRoom(io2, room), 100);
 }
 function tickRoom(io2, room) {
   const now = Date.now();
+  tickBot(io2, room, now);
   const event = room.events[room.eventCursor];
   if (event && now >= event.startsAt && now <= event.startsAt + event.duration) {
     if (room.state.currentEvent?.id !== event.id) {
       room.state.currentEvent = event;
       room.state.version++;
       io2.to(room.id).emit("match:event", { event, serverTime: now });
-      scheduleBot(io2, room, event);
     }
   } else if (event && now > event.startsAt + event.duration) {
-    if (!event.shouldAct) rewardPatience(room, event);
     room.eventCursor++;
     room.state.currentEvent = null;
     room.state.version++;
@@ -1052,31 +1043,23 @@ function tickRoom(io2, room) {
   }
   if (now >= room.state.roundEndsAt || room.eventCursor >= room.events.length) endRound(io2, room);
 }
-function rewardPatience(room, event) {
-  for (const player of Object.values(room.state.players)) {
-    if (player.lastInputAt < event.startsAt) {
-      player.aura += event.reward;
-      player.combo++;
-      player.highestCombo = Math.max(player.highestCombo, player.combo);
-    }
-  }
-}
-function scheduleBot(io2, room, event) {
-  if (room.mode !== "TRAINING") return;
+function tickBot(io2, room, now) {
+  if (room.mode !== "TRAINING" || now < room.nextBotActionAt) return;
   const bot = Object.values(room.state.players).find((p) => p.id.startsWith("bot:"));
-  const decision = botDecision(event, room.difficulty, room.state.seed + room.state.round);
+  const event = room.state.currentEvent || room.events[room.eventCursor] || room.events[0];
+  if (!event) return;
+  const decision = botDecision(event, room.difficulty, room.state.seed + room.state.round + bot.lastSequence);
+  room.nextBotActionAt = now + decision.delay;
   if (!decision.act) return;
+  const result = applyInput(room.state, { playerId: bot.id, input: "SIX", clientTimestamp: now, sequence: bot.lastSequence + 1 }, now);
+  io2.to(room.id).emit("match:action", { playerId: bot.id, input: "SIX", result, serverTime: now });
   setTimeout(() => {
-    if (room.state.phase !== "ROUND_ACTIVE" || room.state.currentEvent?.id !== event.id) return;
-    const now = Date.now();
-    applyInput(room.state, { playerId: bot.id, input: "SIX", clientTimestamp: now, sequence: bot.lastSequence + 1 }, now);
-    setTimeout(() => {
-      const at = Date.now();
-      const result = applyInput(room.state, { playerId: bot.id, input: "SEVEN", clientTimestamp: at, sequence: bot.lastSequence + 1 }, at);
-      io2.to(room.id).emit("match:action", { playerId: bot.id, result, serverTime: at });
-      io2.to(room.id).emit("match:state", safeState(room));
-    }, decision.pairGap);
-  }, decision.delay);
+    if (room.state.phase !== "ROUND_ACTIVE") return;
+    const at = Date.now();
+    const result2 = applyInput(room.state, { playerId: bot.id, input: "SEVEN", clientTimestamp: at, sequence: bot.lastSequence + 1 }, at);
+    io2.to(room.id).emit("match:action", { playerId: bot.id, input: "SEVEN", result: result2, serverTime: at });
+    io2.to(room.id).emit("match:state", safeState(room));
+  }, decision.pairGap);
 }
 function handleInput(io2, socket, raw, ack) {
   const room = getRoomFor(socket), user = socketUsers.get(socket.id);
@@ -1084,7 +1067,7 @@ function handleInput(io2, socket, raw, ack) {
   const latency = Number(socket.data.latency || 0);
   const result = applyInput(room.state, { ...raw, playerId: user.id }, Date.now(), Math.min(latency, env.MAX_LATENCY_COMPENSATION_MS * 2));
   ack?.(result);
-  io2.to(room.id).emit("match:action", { playerId: user.id, result, serverTime: Date.now() });
+  io2.to(room.id).emit("match:action", { playerId: user.id, input: raw.input, result, serverTime: Date.now() });
   io2.to(room.id).emit("match:state", safeState(room));
 }
 function endRound(io2, room) {
@@ -1107,8 +1090,9 @@ function endRound(io2, room) {
   room.state.phase = "INTERMISSION";
   for (const player of players) {
     player.aura = 0;
-    player.ego = Math.min(100, player.ego + 25);
+    player.ego = 0;
     player.combo = 0;
+    player.pendingSixAt = null;
   }
   setTimeout(() => startRoom(io2, room), 3500);
 }

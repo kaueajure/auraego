@@ -127,15 +127,17 @@ npm run test
 npm run build
 ```
 
-Os testes determinísticos cobrem ordem 6→7, pacotes duplicados, spam, seed de eventos, atraso do bot e MMR. Fluxos que dependem de MySQL e SMTP devem rodar em CI com serviços reais de teste; não há fallback que finja envio de e-mail.
+Os testes determinísticos cobrem ordem 6→7, pacotes duplicados, alternância rápida, proteção contra velocidade impossível, seed de eventos, ritmo do bot e MMR. Fluxos que dependem de MySQL e SMTP devem rodar em CI com serviços reais de teste; não há fallback que finja envio de e-mail.
 
 ## Mecânica
 
-- Desktop: `6`, depois `7`. Mobile: dois controles grandes.
-- A janela do evento, intervalo do par, combo, ego e latência limitada participam do cálculo.
-- Eventos de espera recompensam quem não age.
-- Mais de oito inputs em 1,5 segundo aciona punição de spam no servidor.
-- Ego zerado interrompe o combo, restaura 25 pontos e bloqueia ações por quatro segundos.
+- Desktop: alterne `6` e `7` o mais rápido possível. Mobile: alterne os dois controles grandes.
+- Cada par válido `6 → 7` alimenta o farm; a Aura sobe um ponto a cada três pares e o Ego, um ponto a cada cinco.
+- Tecla repetida ou intervalo acima de 450 ms quebra o combo, mas não retira os pontos já conquistados.
+- A proteção do servidor rejeita somente taxas fisicamente impossíveis; alternância humana rápida é a mecânica principal.
+- Os eventos dão ritmo visual à rodada, sem obrigar o jogador a parar de farmar.
+- Esferas raras podem surgir durante pares válidos; ao serem tocadas, ativam por dez segundos uma transformação facial original de mandíbula marcada e um gesto animado da mão no queixo.
+- Os personagens procedurais têm face, pescoço, ombros, bíceps, antebraços, palmas e dedos modelados separadamente.
 - Melhor de três; empates disparam um evento de morte súbita.
 - Bots usam a mesma engine, têm reação mínima e não recebem inputs futuros.
 
@@ -154,4 +156,4 @@ Os testes determinísticos cobrem ordem 6→7, pacotes duplicados, spam, seed de
 2. Adicionar Redis adapter, presença distribuída e idempotência de persistência.
 3. Substituir personagens procedurais por GLB originais comprimidos com Draco/KTX2.
 4. Produzir áudio original e disponibilizar legendas visuais equivalentes.
-5. Instrumentar métricas de latência, abandono, equilíbrio dos eventos e taxa de spam.
+5. Instrumentar métricas de latência, abandono, pares por segundo e equilíbrio dos bots.

@@ -31,8 +31,9 @@ export interface InputIntent { playerId: string; input: InputKind; clientTimesta
 export interface ActionResult { accepted: boolean; evaluation: Evaluation; auraDelta: number; egoDelta: number; combo: number; reason?: string }
 
 export const GAME_CONFIG = {
-  maxEgo: 100, pairMinMs: 70, pairMaxMs: 650, idealPairMs: 230,
-  spamWindowMs: 1500, spamLimit: 8, actionLockMs: 900,
+  maxEgo: 100, pairMinMs: 30, pairMaxMs: 450, idealPairMs: 140,
+  auraPairsPerPoint: 3, egoPairsPerPoint: 5,
+  spamWindowMs: 1500, spamLimit: 60, actionLockMs: 0,
   roundDurationMs: 45_000, roundsToWin: 2, latencyCapMs: 150
 } as const;
 
@@ -49,7 +50,7 @@ const EVENT_TEMPLATES: Omit<ArenaEvent, "id" | "startsAt">[] = [
 ];
 
 export const createPlayer = (id: string, username: string): PlayerState => ({
-  id, username, aura: 0, ego: 100, combo: 0, multiplier: 1, lastInputAt: 0,
+  id, username, aura: 0, ego: 0, combo: 0, multiplier: 1, lastInputAt: 0,
   lastSequence: 0, pendingSixAt: null, inputTimes: [], identicalIntervals: 0,
   mistakes: 0, perfectActions: 0, spamViolations: 0, successfulActions: 0,
   totalActions: 0, highestCombo: 0, egoBrokenUntil: 0
@@ -82,14 +83,12 @@ export function createGame(seed: number, players: Array<{ id: string; username: 
   };
 }
 
-function fail(player: PlayerState, evaluation: Evaluation, egoLoss: number, now: number, reason: string): ActionResult {
-  player.ego = Math.max(0, player.ego - egoLoss);
-  player.combo = 0; player.multiplier = 1; player.mistakes++;
-  if (player.ego === 0) { player.egoBrokenUntil = now + 4000; player.ego = 25; evaluation = "EGO_DESTRUIDO"; }
-  return { accepted: true, evaluation, auraDelta: 0, egoDelta: -egoLoss, combo: 0, reason };
+function fail(player: PlayerState, evaluation: Evaluation, reason: string): ActionResult {
+  player.pendingSixAt = null; player.combo = 0; player.multiplier = 1; player.mistakes++;
+  return { accepted: true, evaluation, auraDelta: 0, egoDelta: 0, combo: 0, reason };
 }
 
-export function applyInput(state: GameState, intent: InputIntent, serverNow: number, estimatedLatency = 0): ActionResult {
+export function applyInput(state: GameState, intent: InputIntent, serverNow: number, _estimatedLatency = 0): ActionResult {
   const player = state.players[intent.playerId];
   if (!player || state.phase !== "ROUND_ACTIVE") return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player?.combo ?? 0, reason: "STATE" };
   if (!Number.isInteger(intent.sequence) || intent.sequence <= player.lastSequence) return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "SEQUENCE" };
@@ -97,35 +96,37 @@ export function applyInput(state: GameState, intent: InputIntent, serverNow: num
   player.lastSequence = intent.sequence;
   player.inputTimes = [...player.inputTimes.filter(t => serverNow - t <= GAME_CONFIG.spamWindowMs), serverNow];
   if (player.inputTimes.length > GAME_CONFIG.spamLimit) {
-    player.spamViolations++; player.aura = Math.max(0, player.aura - 8);
-    return fail(player, "FORCADO", 12, serverNow, "SPAM");
+    player.spamViolations++;
+    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_RATE" };
   }
-  if (serverNow < player.egoBrokenUntil) return { accepted: false, evaluation: "SEM_AURA", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "EGO_BROKEN" };
   player.lastInputAt = serverNow;
   if (intent.input === "SIX") {
+    if (player.pendingSixAt !== null) return fail(player, "ERROU", "ORDER");
     player.pendingSixAt = serverNow;
     return { accepted: true, evaluation: "SEM_AURA", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "PAIR_PENDING" };
   }
   player.totalActions++;
-  if (player.pendingSixAt === null) return fail(player, "ERROU", 8, serverNow, "ORDER");
+  if (player.pendingSixAt === null) return fail(player, "ERROU", "ORDER");
   const pairGap = serverNow - player.pendingSixAt;
   player.pendingSixAt = null;
-  if (pairGap < GAME_CONFIG.pairMinMs || pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", 7, serverNow, "PAIR_TIMING");
-  const event = state.currentEvent;
-  if (!event) { player.aura = Math.max(0, player.aura - 5); return fail(player, "FORCADO", 9, serverNow, "NO_EVENT"); }
-  const compensatedNow = serverNow - Math.min(Math.max(estimatedLatency / 2, 0), GAME_CONFIG.latencyCapMs);
-  const offset = compensatedNow - event.startsAt;
-  if (!event.shouldAct && offset < event.hitWindow[0]) { player.aura = Math.max(0, player.aura - event.penalty); return fail(player, "FORCADO", event.penalty, serverNow, "TRAP"); }
-  if (offset < event.hitWindow[0] || offset > event.hitWindow[1]) return fail(player, "FORA_DO_RITMO", event.penalty, serverNow, "EVENT_TIMING");
-  const perfect = offset >= event.perfectWindow[0] && offset <= event.perfectWindow[1] && Math.abs(pairGap - GAME_CONFIG.idealPairMs) < 100;
+  if (pairGap < GAME_CONFIG.pairMinMs) {
+    player.spamViolations++;
+    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_SPEED" };
+  }
+  if (pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", "PAIR_TIMING");
+  const perfect = pairGap <= GAME_CONFIG.idealPairMs;
   player.combo++; player.highestCombo = Math.max(player.highestCombo, player.combo);
-  player.multiplier = Math.min(2.5, 1 + player.combo * 0.15);
-  const brokenFactor = serverNow < player.egoBrokenUntil ? 0.5 : 1;
-  const gain = Math.round(event.reward * player.multiplier * brokenFactor * (perfect ? 1.5 : 1));
-  player.aura += gain; player.successfulActions++;
+  player.multiplier = 1;
+  player.successfulActions++;
+  const auraGain = player.successfulActions % GAME_CONFIG.auraPairsPerPoint === 0 ? 1 : 0;
+  const egoStep = player.successfulActions % GAME_CONFIG.egoPairsPerPoint === 0 ? 1 : 0;
+  const nextEgo = Math.min(GAME_CONFIG.maxEgo, player.ego + egoStep);
+  const egoGain = nextEgo - player.ego;
+  player.aura += auraGain;
+  player.ego = nextEgo;
   if (perfect) player.perfectActions++;
-  const evaluation: Evaluation = perfect ? (player.combo >= 6 ? "AURA_LENDARIA" : "SIX_SEVEN_PERFEITO") : player.combo >= 4 ? "AURA_FARM" : "LIMPO";
-  return { accepted: true, evaluation, auraDelta: gain, egoDelta: 0, combo: player.combo };
+  const evaluation: Evaluation = player.combo >= 25 ? "AURA_LENDARIA" : player.combo >= 8 ? "AURA_FARM" : perfect ? "SIX_SEVEN_PERFEITO" : "LIMPO";
+  return { accepted: true, evaluation, auraDelta: auraGain, egoDelta: egoGain, combo: player.combo, reason: auraGain || egoGain ? undefined : "FARM_PROGRESS" };
 }
 
 export function mmrDelta(playerMmr: number, opponentMmr: number, score: 0 | 0.5 | 1, abandoned = false): number {
@@ -135,16 +136,16 @@ export function mmrDelta(playerMmr: number, opponentMmr: number, score: 0 | 0.5 
 
 export type BotDifficulty = "INICIANTE" | "NORMAL" | "DIFICIL" | "INSANO";
 export const BOT_PROFILES = {
-  INICIANTE: { reaction: [900, 1500], accuracy: 0.55, trapSense: 0.45 },
-  NORMAL: { reaction: [600, 1100], accuracy: 0.72, trapSense: 0.7 },
-  DIFICIL: { reaction: [380, 760], accuracy: 0.86, trapSense: 0.86 },
-  INSANO: { reaction: [260, 580], accuracy: 0.93, trapSense: 0.94 }
+  INICIANTE: { cycle: [620, 820], pairGap: [260, 380], accuracy: 0.68 },
+  NORMAL: { cycle: [430, 620], pairGap: [170, 280], accuracy: 0.8 },
+  DIFICIL: { cycle: [290, 430], pairGap: [90, 190], accuracy: 0.9 },
+  INSANO: { cycle: [190, 300], pairGap: [55, 135], accuracy: 0.96 }
 } as const;
 
 export function botDecision(event: ArenaEvent, difficulty: BotDifficulty, seed: number): { act: boolean; delay: number; pairGap: number } {
   const profile = BOT_PROFILES[difficulty], random = mulberry32(seed + event.id * 67);
-  const understandsTrap = random() < profile.trapSense;
-  const act = event.shouldAct ? random() < profile.accuracy : !understandsTrap;
-  const delay = profile.reaction[0] + random() * (profile.reaction[1] - profile.reaction[0]);
-  return { act, delay: Math.round(delay), pairGap: Math.round(180 + random() * 180) };
+  const act = random() < profile.accuracy;
+  const delay = profile.cycle[0] + random() * (profile.cycle[1] - profile.cycle[0]);
+  const pairGap = profile.pairGap[0] + random() * (profile.pairGap[1] - profile.pairGap[0]);
+  return { act, delay: Math.round(delay), pairGap: Math.round(pairGap) };
 }

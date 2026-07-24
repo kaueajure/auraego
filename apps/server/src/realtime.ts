@@ -10,7 +10,7 @@ interface QueueEntry { socketId: string; user: ConnectedUser; joinedAt: number }
 interface Room {
   id: string; mode: "RANKED" | "TRAINING"; state: GameState; events: ArenaEvent[];
   sockets: Map<string, string>; timer: NodeJS.Timeout; eventCursor: number;
-  difficulty?: BotDifficulty; disconnected: Map<string, number>; ending: boolean;
+  difficulty?: BotDifficulty; nextBotActionAt: number; disconnected: Map<string, number>; ending: boolean;
 }
 
 const queue = new Map<string, QueueEntry>();
@@ -108,7 +108,7 @@ async function startTraining(io: Server, socket: Socket, requested?: BotDifficul
 
 function makeRoom(id: string, mode: Room["mode"], seed: number, users: ConnectedUser[]): Room {
   const now = Date.now();
-  return { id, mode, state: createGame(seed, users, now), events: [], sockets: new Map(), eventCursor: 0, timer: setInterval(() => {}, 60_000), disconnected: new Map(), ending: false };
+  return { id, mode, state: createGame(seed, users, now), events: [], sockets: new Map(), eventCursor: 0, timer: setInterval(() => {}, 60_000), nextBotActionAt: now, disconnected: new Map(), ending: false };
 }
 
 function startRoom(io: Server, room: Room) {
@@ -116,6 +116,7 @@ function startRoom(io: Server, room: Room) {
   const now = Date.now();
   room.state.phase = "ROUND_ACTIVE"; room.state.roundEndsAt = now + 45_000;
   room.events = generateEvents(room.state.seed + room.state.round, now, 10); room.eventCursor = 0;
+  room.nextBotActionAt = now + 500;
   void markMatchActive(room.id);
   io.to(room.id).emit("match:start", { ...safeState(room), countdownEndedAt: now });
   room.timer = setInterval(() => tickRoom(io, room), 100);
@@ -123,43 +124,37 @@ function startRoom(io: Server, room: Room) {
 
 function tickRoom(io: Server, room: Room) {
   const now = Date.now();
+  tickBot(io, room, now);
   const event = room.events[room.eventCursor];
   if (event && now >= event.startsAt && now <= event.startsAt + event.duration) {
     if (room.state.currentEvent?.id !== event.id) {
       room.state.currentEvent = event; room.state.version++;
       io.to(room.id).emit("match:event", { event, serverTime: now });
-      scheduleBot(io, room, event);
     }
   } else if (event && now > event.startsAt + event.duration) {
-    if (!event.shouldAct) rewardPatience(room, event);
     room.eventCursor++; room.state.currentEvent = null; room.state.version++;
     io.to(room.id).emit("match:state", safeState(room));
   }
   if (now >= room.state.roundEndsAt || room.eventCursor >= room.events.length) endRound(io, room);
 }
 
-function rewardPatience(room: Room, event: ArenaEvent) {
-  for (const player of Object.values(room.state.players)) {
-    if (player.lastInputAt < event.startsAt) { player.aura += event.reward; player.combo++; player.highestCombo = Math.max(player.highestCombo, player.combo); }
-  }
-}
-
-function scheduleBot(io: Server, room: Room, event: ArenaEvent) {
-  if (room.mode !== "TRAINING") return;
+function tickBot(io: Server, room: Room, now: number) {
+  if (room.mode !== "TRAINING" || now < room.nextBotActionAt) return;
   const bot = Object.values(room.state.players).find(p => p.id.startsWith("bot:"))!;
-  const decision = botDecision(event, room.difficulty!, room.state.seed + room.state.round);
+  const event = room.state.currentEvent || room.events[room.eventCursor] || room.events[0];
+  if (!event) return;
+  const decision = botDecision(event, room.difficulty!, room.state.seed + room.state.round + bot.lastSequence);
+  room.nextBotActionAt = now + decision.delay;
   if (!decision.act) return;
+  const result = applyInput(room.state, { playerId: bot.id, input: "SIX", clientTimestamp: now, sequence: bot.lastSequence + 1 }, now);
+  io.to(room.id).emit("match:action", { playerId: bot.id, input: "SIX", result, serverTime: now });
   setTimeout(() => {
-    if (room.state.phase !== "ROUND_ACTIVE" || room.state.currentEvent?.id !== event.id) return;
-    const now = Date.now();
-    applyInput(room.state, { playerId: bot.id, input: "SIX", clientTimestamp: now, sequence: bot.lastSequence + 1 }, now);
-    setTimeout(() => {
-      const at = Date.now();
-      const result = applyInput(room.state, { playerId: bot.id, input: "SEVEN", clientTimestamp: at, sequence: bot.lastSequence + 1 }, at);
-      io.to(room.id).emit("match:action", { playerId: bot.id, result, serverTime: at });
-      io.to(room.id).emit("match:state", safeState(room));
-    }, decision.pairGap);
-  }, decision.delay);
+    if (room.state.phase !== "ROUND_ACTIVE") return;
+    const at = Date.now();
+    const result = applyInput(room.state, { playerId: bot.id, input: "SEVEN", clientTimestamp: at, sequence: bot.lastSequence + 1 }, at);
+    io.to(room.id).emit("match:action", { playerId: bot.id, input: "SEVEN", result, serverTime: at });
+    io.to(room.id).emit("match:state", safeState(room));
+  }, decision.pairGap);
 }
 
 function handleInput(io: Server, socket: Socket, raw: Omit<InputIntent, "playerId">, ack?: (value: unknown) => void) {
@@ -168,7 +163,7 @@ function handleInput(io: Server, socket: Socket, raw: Omit<InputIntent, "playerI
   const latency = Number(socket.data.latency || 0);
   const result = applyInput(room.state, { ...raw, playerId: user.id }, Date.now(), Math.min(latency, env.MAX_LATENCY_COMPENSATION_MS * 2));
   ack?.(result);
-  io.to(room.id).emit("match:action", { playerId: user.id, result, serverTime: Date.now() });
+  io.to(room.id).emit("match:action", { playerId: user.id, input: raw.input, result, serverTime: Date.now() });
   io.to(room.id).emit("match:state", safeState(room));
 }
 
@@ -186,7 +181,7 @@ function endRound(io: Server, room: Room) {
   io.to(room.id).emit("match:round_end", { round: room.state.round, winnerId: roundWinner.id, state: safeState(room) });
   if (room.state.roundWins[roundWinner.id] >= 2) return void finishRoom(io, room, roundWinner.id, "SCORE");
   room.state.round++; room.state.phase = "INTERMISSION";
-  for (const player of players) { player.aura = 0; player.ego = Math.min(100, player.ego + 25); player.combo = 0; }
+  for (const player of players) { player.aura = 0; player.ego = 0; player.combo = 0; player.pendingSixAt = null; }
   setTimeout(() => startRoom(io, room), 3500);
 }
 
