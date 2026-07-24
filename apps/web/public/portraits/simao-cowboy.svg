@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="640" viewBox="0 0 512 640" role="img" aria-label="JACK">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5c3a1c"/>
+      <stop offset="100%" stop-color="#8b5a2b"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#c4a35a" stop-opacity=".55"/>
+      <stop offset="70%" stop-color="#c4a35a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="640" fill="#14110e"/>
+  <rect width="512" height="640" fill="url(#glow)"/>
+  <ellipse cx="256" cy="520" rx="170" ry="34" fill="#000" opacity=".35"/>
+  <circle cx="256" cy="390" r="168" fill="url(#bg)"/>
+  <circle cx="256" cy="208" r="86" fill="#c48a6a"/>
+  <ellipse cx="256" cy="148" rx="92" ry="48" fill="#2a1a12"/>
+  <path d="M170 220c18 74 154 74 172 0" fill="#2a1a12" opacity=".9"/>
+  <rect x="176" y="286" width="160" height="210" rx="48" fill="#8b5a2b"/>
+  <circle cx="228" cy="208" r="8" fill="#1a1410"/>
+  <circle cx="284" cy="208" r="8" fill="#1a1410"/>
+  <path d="M236 236c12 14 28 14 40 0" fill="none" stroke="#1a1410" stroke-width="5" stroke-linecap="round"/>
+  
+      <ellipse cx="256" cy="120" rx="120" ry="28" fill="#5c3a1c"/>
+      <path d="M176 140h160l-20 36H196z" fill="#8b5a2b"/>
+      <rect x="196" y="300" width="120" height="180" fill="#3d4a5c"/>
+      <path d="M210 300h92l-16 40h-60z" fill="#c4a35a"/>
+  <text x="256" y="580" text-anchor="middle" fill="#f4ebe0" font-family="Arial Black, Arial, sans-serif" font-size="36" letter-spacing="2">JACK</text>
+</svg>

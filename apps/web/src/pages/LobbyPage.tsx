@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { RANK_LABELS, type BotDifficulty } from "@aura-ego/shared";
+import { isAdminEmail, RANK_LABELS, type BotDifficulty } from "@aura-ego/shared";
 import { useAuth } from "../auth-context";
 import type { CharacterAction } from "../components/Character";
 import { Logo } from "../components/Logo";
@@ -90,7 +90,7 @@ export function LobbyPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [controls, listening]);
   return <main className="lobby">
-    <header className="topbar"><Logo compact /><nav aria-label="Menu principal"><button className="active">Jogar</button><button onClick={() => navigate("/personalizar")}>Personalizar</button><button onClick={() => navigate("/ranking")}>Ranking</button><button onClick={() => setModal("settings")}>Configurações</button></nav><div className="profile-chip"><span>{user.username.slice(0, 2).toUpperCase()}</span><div><b>{user.username}</b><small>{RANK_LABELS[user.profile.rank]}</small></div><button aria-label="Sair" onClick={() => void logout()}>↗</button></div></header>
+    <header className="topbar"><Logo compact /><nav aria-label="Menu principal"><button className="active">Jogar</button><button onClick={() => navigate("/personalizar")}>Personalizar</button><button onClick={() => navigate("/ranking")}>Ranking</button>{isAdminEmail(user.email) && <button onClick={() => navigate("/admin")}>Admin</button>}<button onClick={() => setModal("settings")}>Configurações</button></nav><div className="profile-chip"><span>{user.username.slice(0, 2).toUpperCase()}</span><div><b>{user.username}</b><small>{RANK_LABELS[user.profile.rank]}</small></div><button aria-label="Sair" onClick={() => void logout()}>↗</button></div></header>
     <section className="lobby-scene"><LobbyShowcaseScene look={equippedLook} pose={pose} cosmetics={user.profile.selectedCosmetics} /><div className="scene-vignette" /><div className="lobby-title"><span className="eyebrow">{arenaLabel}</span><h1>Defenda sua<br /><em>presença.</em></h1><span className="equipped-look-label">SKIN EQUIPADA <b>{equippedLook.name}</b></span></div></section>
     <section className="pose-picker" aria-label="Poses do personagem">
       <div className="pose-picker-head"><span>POSE DE ENTRADA</span><strong>10 PRESETS</strong></div>

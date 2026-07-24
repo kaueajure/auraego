@@ -8,6 +8,7 @@ const ResetPage = lazy(() => import("./pages/TokenPages").then(m => ({ default: 
 const LobbyPage = lazy(() => import("./pages/LobbyPage").then(m => ({ default: m.LobbyPage })));
 const PersonalizePage = lazy(() => import("./pages/PersonalizePage").then(m => ({ default: m.PersonalizePage })));
 const RankingPage = lazy(() => import("./pages/RankingPage").then(m => ({ default: m.RankingPage })));
+const AdminPage = lazy(() => import("./pages/AdminPage").then(m => ({ default: m.AdminPage })));
 const GamePage = lazy(() => import("./pages/GamePage").then(m => ({ default: m.GamePage })));
 
 const Protected = ({ children }: { children: React.ReactNode }) => {
@@ -23,6 +24,7 @@ export function App() {
     <Route path="/" element={<Protected><LobbyPage /></Protected>} />
     <Route path="/personalizar" element={<Protected><PersonalizePage /></Protected>} />
     <Route path="/ranking" element={<Protected><RankingPage /></Protected>} />
+    <Route path="/admin" element={<Protected><AdminPage /></Protected>} />
     <Route path="/partida" element={<Protected><GamePage /></Protected>} />
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes></Suspense></AuthProvider>;

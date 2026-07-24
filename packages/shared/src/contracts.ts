@@ -54,3 +54,21 @@ export interface MatchSummary {
   result: "WIN" | "LOSS" | "DRAW" | null; opponent?: string;
   aura: number; highestCombo: number; accuracy: number;
 }
+
+/** Único e-mail com acesso à área admin. */
+export const ADMIN_EMAIL = "kaueajure@gmail.com";
+
+export type ActivityEventType = "LOGIN" | "MATCH_START";
+
+export interface ActivityLogEntry {
+  id: string;
+  userId: string | null;
+  email: string;
+  eventType: ActivityEventType;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export function isAdminEmail(email: string | null | undefined): boolean {
+  return Boolean(email && email.toLowerCase() === ADMIN_EMAIL);
+}

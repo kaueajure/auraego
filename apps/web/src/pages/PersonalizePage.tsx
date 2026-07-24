@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { PublicUser } from "@aura-ego/shared";
-import { RANK_LABELS } from "@aura-ego/shared";
+import { isAdminEmail, RANK_LABELS } from "@aura-ego/shared";
 import { api } from "../api";
 import { useAuth } from "../auth-context";
 import { Logo } from "../components/Logo";
@@ -19,18 +19,6 @@ function Icon({ name }: { name: "rotate" | "zoom" | "check" | "lock" }) {
   if (name === "zoom") return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 5 5M10.5 8v5m-2.5-2.5h5" /></svg>;
   if (name === "lock") return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>;
-}
-
-function lookBadge(type: string) {
-  if (type === "emi") return "EMI";
-  if (type === "charlie") return "CM";
-  if (type === "banana") return "BN";
-  if (type === "phil") return "PH";
-  if (type === "cj") return "CJ";
-  if (type === "order67") return "67";
-  if (type === "simao") return "JS";
-  if (type === "model212") return "212";
-  return "A&E";
 }
 
 export function PersonalizePage() {
@@ -78,6 +66,7 @@ export function PersonalizePage() {
         <button onClick={() => navigate("/")}>Jogar</button>
         <button className="active">Personalizar</button>
         <button onClick={() => navigate("/ranking")}>Ranking</button>
+        {isAdminEmail(user.email) && <button onClick={() => navigate("/admin")}>Admin</button>}
       </nav>
       <div className="profile-chip">
         <span>{user.username.slice(0, 2).toUpperCase()}</span>
@@ -142,7 +131,7 @@ export function PersonalizePage() {
         >
           <span className="skin-card-no">0{index + 1}</span>
           <div className="skin-card-art" style={{ "--skin-a": look.swatches[0], "--skin-b": look.swatches[1] } as React.CSSProperties}>
-            <span>{lookBadge(look.type)}</span>
+            <img src={look.portrait} alt={look.name} loading="lazy" />
           </div>
           <div><small>{look.rarity}</small><b>{look.name}</b><span>{look.collection}</span></div>
           {equippedId === look.id && <i className="equipped-mark"><Icon name="check" /></i>}

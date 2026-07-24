@@ -12,6 +12,8 @@ export interface WardrobeLook {
   pants: string;
   shoes: string;
   swatches: string[];
+  /** Card portrait on Personalize (`apps/web/public/portraits`). */
+  portrait: string;
 }
 
 export const DEFAULT_LOOK_ID = "emi";
@@ -32,7 +34,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#191919",
     pants: "#26272b",
     shoes: "#edf0ee",
-    swatches: ["#18aab8", "#f5bf25", "#ef6537"]
+    swatches: ["#18aab8", "#f5bf25", "#ef6537"],
+    portrait: "/portraits/emi.svg"
   },
   {
     id: "charlie-morningstar",
@@ -47,7 +50,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#f5dfbd",
     pants: "#281b25",
     shoes: "#20161b",
-    swatches: ["#d74339", "#f4d083", "#281b25"]
+    swatches: ["#d74339", "#f4d083", "#281b25"],
+    portrait: "/portraits/charlie-morningstar.svg"
   },
   {
     id: "phil",
@@ -62,7 +66,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#171717",
     pants: "#2464a8",
     shoes: "#202020",
-    swatches: ["#f4d21f", "#2464a8", "#202020"]
+    swatches: ["#f4d21f", "#2464a8", "#202020"],
+    portrait: "/portraits/phil.svg"
   },
   {
     id: "banana-fortnite",
@@ -77,7 +82,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#1d3b24",
     pants: "#2f6b3a",
     shoes: "#1a1a1a",
-    swatches: ["#f2c012", "#2f6b3a", "#f7e27a"]
+    swatches: ["#f2c012", "#2f6b3a", "#f7e27a"],
+    portrait: "/portraits/banana-fortnite.svg"
   },
   {
     id: "carl-johnson",
@@ -92,7 +98,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#1a120e",
     pants: "#2a3d5c",
     shoes: "#ececec",
-    swatches: ["#2f7a3a", "#c4a35a", "#2a3d5c"]
+    swatches: ["#2f7a3a", "#c4a35a", "#2a3d5c"],
+    portrait: "/portraits/carl-johnson.svg"
   },
   {
     id: "order-number-67",
@@ -107,7 +114,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#1a1a1a",
     pants: "#2a2438",
     shoes: "#111111",
-    swatches: ["#6b2fd6", "#f0c41a", "#2a2438"]
+    swatches: ["#6b2fd6", "#f0c41a", "#2a2438"],
+    portrait: "/portraits/order-number-67.svg"
   },
   {
     id: "simao-cowboy",
@@ -122,7 +130,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#2a1a12",
     pants: "#3d4a5c",
     shoes: "#1a120e",
-    swatches: ["#8b5a2b", "#c4a35a", "#3d4a5c"]
+    swatches: ["#8b5a2b", "#c4a35a", "#3d4a5c"],
+    portrait: "/portraits/simao-cowboy.svg"
   },
   {
     id: "look-212",
@@ -137,7 +146,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#1a1a1a",
     pants: "#1e2430",
     shoes: "#111111",
-    swatches: ["#2c2c2c", "#c0c0c0", "#1e2430"]
+    swatches: ["#2c2c2c", "#c0c0c0", "#1e2430"],
+    portrait: "/portraits/look-212.svg"
   },
   {
     id: "meia-noite",
@@ -152,7 +162,8 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     hair: "#141319",
     pants: "#191824",
     shoes: "#d8d4e1",
-    swatches: ["#37324e", "#9d7be9", "#191824"]
+    swatches: ["#37324e", "#9d7be9", "#191824"],
+    portrait: "/portraits/meia-noite.svg"
   }
 ];
 

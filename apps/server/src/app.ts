@@ -8,6 +8,7 @@ import { env } from "./config.js";
 import { authRouter } from "./auth.js";
 import { usersRouter } from "./users.js";
 import { trainingRouter } from "./training.js";
+import { adminRouter } from "./admin.js";
 
 export const app = express();
 app.disable("x-powered-by");
@@ -20,6 +21,7 @@ app.get("/health", (_req, res) => res.json({ status: "ok", version: "1.0.0" }));
 app.use("/auth", authRouter);
 app.use("/users", usersRouter);
 app.use("/training", trainingRouter);
+app.use("/admin", adminRouter);
 
 // In production the same Node process serves the compiled Vite application.
 // This keeps HTTP, WebSocket and frontend under one origin and one Hostinger app.

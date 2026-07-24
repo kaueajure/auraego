@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { RANK_LABELS, type Rank } from "@aura-ego/shared";
+import { isAdminEmail, RANK_LABELS, type Rank } from "@aura-ego/shared";
 import { useAuth } from "../auth-context";
 import { api } from "../api";
 import { Logo } from "../components/Logo";
@@ -52,6 +52,7 @@ export function RankingPage() {
         <button onClick={() => navigate("/")}>Jogar</button>
         <button onClick={() => navigate("/personalizar")}>Personalizar</button>
         <button className="active">Ranking</button>
+        {isAdminEmail(user.email) && <button onClick={() => navigate("/admin")}>Admin</button>}
       </nav>
       <div className="profile-chip">
         <span>{user.username.slice(0, 2).toUpperCase()}</span>

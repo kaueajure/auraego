@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    html, body { margin: 0; background: #1a1510; overflow: hidden; }
+    canvas { display: block; width: 512px; height: 640px; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="512" height="640"></canvas>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/vendor/three.module.js",
+      "three/addons/": "/vendor/addons/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+    const params = new URLSearchParams(location.search);
+    const modelPath = params.get("model") || "/models/emi.glb";
+    const canvas = document.getElementById("c");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
+    renderer.setSize(512, 640, false);
+    renderer.setPixelRatio(1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#1f1913");
+    const camera = new THREE.PerspectiveCamera(28, 512 / 640, 0.05, 40);
+    camera.position.set(0, 1.15, 3.1);
+
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+    scene.add(new THREE.AmbientLight(0xfff0d8, 0.85));
+    const key = new THREE.DirectionalLight(0xffe2b0, 2.4);
+    key.position.set(-2.2, 3.4, 3.2);
+    scene.add(key);
+    const fill = new THREE.DirectionalLight(0x88aaff, 0.55);
+    fill.position.set(2.5, 1.2, 1.5);
+    scene.add(fill);
+    const rim = new THREE.SpotLight(0xff7a3c, 12, 12, 0.45, 0.7);
+    rim.position.set(1.8, 2.8, -1.2);
+    scene.add(rim);
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(1.6, 48),
+      new THREE.MeshStandardMaterial({ color: "#2a221a", roughness: 0.92, metalness: 0.05 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = 0.001;
+    scene.add(ground);
+
+    window.__portraitReady = false;
+    window.__portraitError = null;
+
+    try {
+      const gltf = await new GLTFLoader().loadAsync(modelPath);
+      const root = gltf.scene;
+      root.traverse((obj) => {
+        if (obj.isMesh || obj.isSkinnedMesh) {
+          obj.castShadow = false;
+          obj.receiveShadow = false;
+          obj.frustumCulled = false;
+        }
+      });
+      root.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(root);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const scale = 1.55 / Math.max(size.y, 0.001);
+      root.scale.setScalar(scale);
+      root.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
+      root.rotation.y = 0.28;
+      scene.add(root);
+
+      // Bust framing: look at upper body
+      const fitted = new THREE.Box3().setFromObject(root);
+      const midY = fitted.min.y + fitted.getSize(new THREE.Vector3()).y * 0.62;
+      camera.position.set(0.15, midY + 0.05, 2.05);
+      camera.lookAt(0, midY, 0);
+
+      renderer.render(scene, camera);
+      // second pass after textures settle
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      renderer.render(scene, camera);
+      window.__portraitReady = true;
+    } catch (error) {
+      window.__portraitError = String(error?.message || error);
+      console.error(error);
+    }
+  </script>
+</body>
+</html>

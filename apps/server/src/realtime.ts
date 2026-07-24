@@ -3,11 +3,13 @@ import { applyInput, botDecision, collectAuraOrb, createGame, generateEvents, mm
 import { verifyAccess } from "./security.js";
 import { env } from "./config.js";
 import { findUserById } from "./repositories/auth-repository.js";
+import { recordActivity } from "./repositories/activity-repository.js";
 import { createMatch, finishRankedMatch, finishTrainingMatch, getMatchProfiles, markMatchActive } from "./repositories/match-repository.js";
 
 interface ConnectedUser {
   id: string;
   username: string;
+  email: string;
   mmr: number;
   verified: boolean;
   region: string;
@@ -62,6 +64,7 @@ async function refreshConnectedUser(socketId: string): Promise<ConnectedUser | n
     const next: ConnectedUser = {
       ...current,
       username: user.username,
+      email: user.email,
       mmr: user.profile.mmr,
       verified: Boolean(user.emailVerifiedAt),
       lookId: cosmetics.look || "emi",
@@ -84,6 +87,7 @@ export function attachRealtime(io: Server) {
       const connected = {
         id: user.id,
         username: user.username,
+        email: user.email,
         mmr: user.profile.mmr,
         verified: Boolean(user.emailVerifiedAt),
         region: String(socket.handshake.auth.region || "sa-east").slice(0, 24),
@@ -204,6 +208,22 @@ async function createRankedRoom(io: Server, first: QueueEntry, second: QueueEntr
       { userId: firstUser.id, mmrBefore: firstUser.mmr },
       { userId: secondUser.id, mmrBefore: secondUser.mmr }
     ]);
+    for (const [player, opponent] of [
+      [firstUser, secondUser],
+      [secondUser, firstUser]
+    ] as const) {
+      recordActivity({
+        userId: player.id,
+        email: player.email,
+        eventType: "MATCH_START",
+        metadata: {
+          matchId,
+          mode: "RANKED",
+          opponentId: opponent.id,
+          opponentUsername: opponent.username
+        }
+      });
+    }
     const room = makeRoom(matchId, "RANKED", seed, [firstUser, secondUser]);
     room.sockets.set(firstUser.id, first.socketId);
     room.sockets.set(secondUser.id, second.socketId);
@@ -256,9 +276,16 @@ async function startTraining(io: Server, socket: Socket, requested?: BotDifficul
   try {
     const seed = Math.floor(Math.random() * 2_000_000_000);
     const matchId = await createMatch("TRAINING", seed, [{ userId: user.id, mmrBefore: user.mmr }]);
+    recordActivity({
+      userId: user.id,
+      email: user.email,
+      eventType: "MATCH_START",
+      metadata: { matchId, mode: "TRAINING", difficulty }
+    });
     const room = makeRoom(matchId, "TRAINING", seed, [user, {
       id: `bot:${matchId}`,
       username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro",
+      email: "bot@local",
       mmr: user.mmr,
       verified: true,
       region: user.region,

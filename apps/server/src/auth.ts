@@ -14,6 +14,7 @@ import {
   recordFailedLogin, resetPassword, revokeSessionByHash, revokeSessionById,
   rotateSession, verifyEmailToken, type User
 } from "./repositories/auth-repository.js";
+import { recordActivity } from "./repositories/activity-repository.js";
 
 export const authRouter = Router();
 const strictLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
@@ -105,6 +106,12 @@ authRouter.post("/login", strictLimit, async (req, res, next) => {
     await createSessionAndRecordLogin({
       id: sessionId, userId: user.id, refreshTokenHash: sha256(refresh),
       expiresAt: new Date(Date.now() + durationMs(env.JWT_REFRESH_EXPIRES_IN)), ...requestMeta(req)
+    });
+    recordActivity({
+      userId: user.id,
+      email: user.email,
+      eventType: "LOGIN",
+      metadata: { sessionId, username: user.username }
     });
     res.cookie("refresh_token", refresh, cookie).json({ accessToken: accessToken(user.id, sessionId), user: publicUser(user) });
   } catch (error) { next(error); }
