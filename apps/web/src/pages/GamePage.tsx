@@ -9,7 +9,15 @@ import type { CharacterAction } from "../components/Character";
 import { gameSocket } from "../socket";
 import { useGame } from "../store";
 import { api } from "../api";
-import { getEquippedLook } from "../cosmetics";
+import { getEquippedLook, getLook } from "../cosmetics";
+import {
+  labelForCode,
+  ORB_CHALLENGE_CODES,
+  randomOrbChallenge,
+  readControls,
+  type ControlBindings,
+  type OrbChallengeCode
+} from "../controls";
 
 const labels: Record<ActionResult["evaluation"], string> = {
   ERROU: "Errou",
@@ -66,6 +74,11 @@ export function GamePage() {
   const [feedbackByPlayer, setFeedbackByPlayer] = useState<Record<string, PlayerFeedback>>({});
   const [specialOrbVisible, setSpecialOrbVisible] = useState(false);
   const [specialOrbPosition, setSpecialOrbPosition] = useState<[number, number, number]>([-.55, 2.25, .7]);
+  const [orbChallenge, setOrbChallenge] = useState<{
+    keys: [OrbChallengeCode, OrbChallengeCode];
+    progress: number;
+  } | null>(null);
+  const [controls, setControls] = useState<ControlBindings>(() => readControls());
   const [playerChad, setPlayerChad] = useState(false);
   const [auraMultiplier, setAuraMultiplier] = useState(1);
   const [chinPose, setChinPose] = useState(false);
@@ -124,14 +137,20 @@ export function GamePage() {
       1.3 + Math.random() * .45,
       .72
     ]);
+    const binds = readControls();
+    setOrbChallenge({ keys: randomOrbChallenge([binds.six, binds.seven]), progress: 0 });
     setSpecialOrbVisible(true);
     if (orbHideTimer.current) window.clearTimeout(orbHideTimer.current);
-    orbHideTimer.current = window.setTimeout(() => setSpecialOrbVisible(false), 8_000);
+    orbHideTimer.current = window.setTimeout(() => {
+      setSpecialOrbVisible(false);
+      setOrbChallenge(null);
+    }, 8_000);
   }, []);
 
   const collectSpecialOrb = useCallback(() => {
     if (orbHideTimer.current) window.clearTimeout(orbHideTimer.current);
     setSpecialOrbVisible(false);
+    setOrbChallenge(null);
     socket.emit("match:collect_orb", (result?: { accepted?: boolean; multiplier?: number }) => {
       if (!result?.accepted) return;
       if (typeof result.multiplier === "number") setAuraMultiplier(result.multiplier);
@@ -199,6 +218,8 @@ export function GamePage() {
       setAuraMultiplier(1);
       lastOrbMilestone.current = 0;
       lastComboSeen.current = 0;
+      setSpecialOrbVisible(false);
+      setOrbChallenge(null);
       if (actionTimer.current) window.clearTimeout(actionTimer.current);
       if (opponentActionTimer.current) window.clearTimeout(opponentActionTimer.current);
       setAction("idle");
@@ -307,18 +328,60 @@ export function GamePage() {
   }, [animateAction, ended, game.nextSequence, game.status, roundBreak, socket, tutorial, tutorialStep]);
 
   useEffect(() => {
+    const sync = () => setControls(readControls());
+    window.addEventListener("storage", sync);
+    window.addEventListener("aura-ego:controls", sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener("aura-ego:controls", sync);
+    };
+  }, []);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.repeat) return;
-      if (event.key === "6") input("SIX");
-      if (event.key === "7") input("SEVEN");
+      if (orbChallenge && specialOrbVisible) {
+        const expected = orbChallenge.keys[orbChallenge.progress];
+        if (event.code === expected) {
+          event.preventDefault();
+          const nextProgress = orbChallenge.progress + 1;
+          if (nextProgress >= orbChallenge.keys.length) {
+            collectSpecialOrb();
+          } else {
+            setOrbChallenge({ ...orbChallenge, progress: nextProgress });
+          }
+          return;
+        }
+        if ((ORB_CHALLENGE_CODES as readonly string[]).includes(event.code)) {
+          event.preventDefault();
+          setOrbChallenge({ ...orbChallenge, progress: 0 });
+          return;
+        }
+      }
+      if (event.code === controls.six) {
+        event.preventDefault();
+        input("SIX");
+      }
+      if (event.code === controls.seven) {
+        event.preventDefault();
+        input("SEVEN");
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [input]);
+  }, [collectSpecialOrb, controls.seven, controls.six, input, orbChallenge, specialOrbVisible]);
 
   const players = game.state ? Object.values(game.state.players) : [];
   const me = players.find(player => player.id === user?.id) || players[0];
   const opponent = players.find(player => player.id !== me?.id);
+  const myLook = useMemo(
+    () => (me?.lookId ? getLook(me.lookId) : equippedLook),
+    [equippedLook, me?.lookId]
+  );
+  const opponentLook = useMemo(
+    () => getLook(opponent?.lookId),
+    [opponent?.lookId]
+  );
   const seconds = game.state ? Math.max(0, Math.ceil((game.state.roundEndsAt - Date.now()) / 1000)) : 45;
   const eventProgress = game.event ? Math.max(0, Math.min(100, ((Date.now() - game.event.startsAt) / game.event.duration) * 100)) : 0;
   const resultStats = useMemo(() => me ? [
@@ -349,7 +412,10 @@ export function GamePage() {
 
   return <main className="game-page">
     <div className="arena"><ArenaScene
-      playerLook={equippedLook}
+      playerLook={myLook}
+      opponentLook={opponentLook}
+      playerCosmetics={me?.cosmetics ?? user?.profile.selectedCosmetics}
+      opponentCosmetics={opponent?.cosmetics}
       playerAction={chinPose && !roundBreak && !ended ? "chin" : action}
       opponentAction={opponentAction}
       variant={Math.max(0, Math.min(2, (game.state?.round || 1) - 1)) as ArenaVariant}
@@ -357,7 +423,6 @@ export function GamePage() {
       playerScale={1}
       specialOrbVisible={specialOrbVisible}
       specialOrbPosition={specialOrbPosition}
-      onSpecialOrbClick={collectSpecialOrb}
     /></div>
     <header className="game-top">
       <Logo compact />
@@ -394,10 +459,17 @@ export function GamePage() {
       <p>Alterne 6 e 7 o mais rápido que conseguir.</p>
     </section>}
     {playerChad && !roundBreak ? <div className="chad-effect" role="status"><small>EFEITO RARO • FARM {auraMultiplier.toFixed(2)}×</small><strong>MODO GIGACHAD</strong><span>{chinPose ? "Mão no queixo · mandíbula definida" : "Aura farm amplificada"}</span></div> : null}
+    {orbChallenge && specialOrbVisible && !roundBreak && !ended ? <div className="orb-challenge" role="status">
+      <small>BOLA RARA • SEQUÊNCIA</small>
+      <div className="orb-challenge-keys">
+        {orbChallenge.keys.map((code, index) => <kbd key={`${code}-${index}`} className={index < orbChallenge.progress ? "done" : index === orbChallenge.progress ? "next" : ""}>{labelForCode(code)}</kbd>)}
+      </div>
+      <span>Acerte as setas para ativar o GigaChad</span>
+    </div> : null}
     <div className="controls" aria-label="Controles Six Seven">
-      <button onPointerDown={() => input("SIX")} disabled={!!roundBreak || !!ended}><small>TECLA</small><strong>6</strong><span>Mão esquerda</span></button>
+      <button onPointerDown={() => input("SIX")} disabled={!!roundBreak || !!ended}><small>TECLA</small><strong>{labelForCode(controls.six)}</strong><span>Mão esquerda</span></button>
       <div><i /> ritmo <i /></div>
-      <button onPointerDown={() => input("SEVEN")} disabled={!!roundBreak || !!ended}><small>TECLA</small><strong>7</strong><span>Mão direita</span></button>
+      <button onPointerDown={() => input("SEVEN")} disabled={!!roundBreak || !!ended}><small>TECLA</small><strong>{labelForCode(controls.seven)}</strong><span>Mão direita</span></button>
     </div>
     {game.status !== "PLAYING" && !ended && !roundBreak && <div className="countdown"><small>POSTURA</small><strong>{countdown}</strong><p>A partida começa no ritmo do servidor</p></div>}
     {roundBreak && !ended && <div className={`round-break ${iWonRound ? "won" : "lost"}`} role="status">
@@ -461,7 +533,7 @@ function Tutorial({ step, next, close }: { step: number; next: () => void; close
     ["Agora o 7", "Complete o par imediatamente e volte para o 6."],
     ["Velocidade é aura", "Quanto mais rápido você alternar corretamente, mais pares completa antes do relógio zerar."],
     ["Não quebre a sequência", "Tecla repetida ou demora demais quebra o combo. Continue no 6, 7, 6, 7."],
-    ["Olho na bola rara", "Ela aparece a cada 50 de combo. Toque nela para ativar o GigaChad e multiplicar o farm de aura por 1.1×."]
+    ["Olho na bola rara", "Ela aparece a cada 50 de combo. Digite a sequência de setas na tela para ativar o GigaChad e multiplicar o farm por 1.1×."]
   ][Math.min(step, 5)]!;
   return <div className="tutorial">
     <div className="tutorial-step"><span>{Math.min(step + 1, 6)}/6</span><small>TUTORIAL INTERATIVO</small></div>

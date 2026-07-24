@@ -3,7 +3,7 @@ export interface WardrobeLook {
   name: string;
   collection: string;
   description: string;
-  type: "emi" | "charlie" | "phil" | "classic" | "banana" | "cj" | "order67";
+  type: "emi" | "charlie" | "phil" | "classic" | "banana" | "cj" | "order67" | "simao";
   rarity: "Lendária" | "Épica" | "Rara";
   color: string;
   accent: string;
@@ -108,6 +108,21 @@ export const WARDROBE_LOOKS: WardrobeLook[] = [
     pants: "#2a2438",
     shoes: "#111111",
     swatches: ["#6b2fd6", "#f0c41a", "#2a2438"]
+  },
+  {
+    id: "simao-cowboy",
+    name: "Jack Simon",
+    collection: "Faroeste",
+    description: "Chapéu, botas e aura de quem domina a quadra como se fosse o velho oeste.",
+    type: "simao",
+    rarity: "Lendária",
+    color: "#8b5a2b",
+    accent: "#c4a35a",
+    skin: "#c48a6a",
+    hair: "#2a1a12",
+    pants: "#3d4a5c",
+    shoes: "#1a120e",
+    swatches: ["#8b5a2b", "#c4a35a", "#3d4a5c"]
   },
   {
     id: "meia-noite",

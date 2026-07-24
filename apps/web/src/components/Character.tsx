@@ -287,11 +287,24 @@ function poseArmWithIk(
   let desiredHand: Quaternion;
   if (palmUp) {
     const desiredFinger = handDirectionLocal.clone().normalize();
-    const desiredPalm = new Vector3(0, 1, 0);
-    const desiredRight = desiredFinger.clone().cross(desiredPalm).normalize();
-    const sourceRight = arm.sourceFinger.clone().cross(arm.sourcePalm).normalize();
+    let desiredPalm = new Vector3(0, 1, 0);
+    let desiredRight = desiredFinger.clone().cross(desiredPalm);
+    if (desiredRight.lengthSq() < .000001) {
+      desiredRight = new Vector3(1, 0, 0).cross(desiredPalm);
+    }
+    desiredRight.normalize();
+    desiredPalm = desiredRight.clone().cross(desiredFinger).normalize();
+    if (desiredPalm.y < 0) desiredPalm.multiplyScalar(-1);
+
+    const sourceFinger = arm.sourceFinger.clone().normalize();
+    let sourcePalm = arm.sourcePalm.clone().normalize();
+    let sourceRight = sourceFinger.clone().cross(sourcePalm);
+    if (sourceRight.lengthSq() < .000001) sourceRight.set(1, 0, 0);
+    else sourceRight.normalize();
+    sourcePalm = sourceRight.clone().cross(sourceFinger).normalize();
+
     const sourceBasis = new Quaternion().setFromRotationMatrix(
-      new Matrix4().makeBasis(sourceRight, arm.sourceFinger, arm.sourcePalm)
+      new Matrix4().makeBasis(sourceRight, sourceFinger, sourcePalm)
     );
     const desiredBasis = new Quaternion().setFromRotationMatrix(
       new Matrix4().makeBasis(desiredRight, desiredFinger, desiredPalm)
@@ -299,6 +312,18 @@ function poseArmWithIk(
     const desiredInModel = desiredBasis.multiply(sourceBasis.invert());
     const desiredWorld = model.getWorldQuaternion(new Quaternion()).multiply(desiredInModel);
     desiredHand = forearmWorld.clone().invert().multiply(desiredWorld);
+
+    const previousHand = arm.hand.quaternion.clone();
+    const flip = new Quaternion().setFromAxisAngle(sourceFinger, Math.PI);
+    arm.hand.quaternion.copy(desiredHand);
+    model.updateMatrixWorld(true);
+    const palmA = sourcePalm.clone().transformDirection(arm.hand.matrixWorld).y;
+    const flipped = desiredHand.clone().multiply(flip);
+    arm.hand.quaternion.copy(flipped);
+    model.updateMatrixWorld(true);
+    const palmB = sourcePalm.clone().transformDirection(arm.hand.matrixWorld).y;
+    if (palmB > palmA) desiredHand.copy(flipped);
+    arm.hand.quaternion.copy(previousHand);
   } else {
     const worldHandDirection = handDirectionLocal
       .clone()
@@ -683,46 +708,58 @@ export function Character({
     animateFingers(rig.rightFingers, action === "chin");
 
     if (action !== "win" && action !== "lose" && action !== "victory" && action !== "chin" && !(chadMode && action === "idle")) {
+      const idleBob = Math.sin(time * 2.35);
+      const idleSway = Math.sin(time * 1.05);
       const weightShift = gestureActive
         ? gestureArc * gestureDirection
-        : Math.sin(time * .85);
+        : idleSway;
       if (action !== "six" && action !== "seven") {
         rig.chest.quaternion.copy(rig.baseChest).multiply(
           new Quaternion().setFromEuler(new Euler(
             breath * .012,
-            weightShift * .022 * gestureEnergy,
-            -weightShift * .018 * gestureEnergy
+            weightShift * .03 * (gestureEnergy + .3),
+            -weightShift * .025 * (gestureEnergy + .3)
           ))
         );
         rig.head.quaternion.copy(rig.baseHead).multiply(
           new Quaternion().setFromEuler(new Euler(
             -breath * .008,
-            -weightShift * .03 * gestureEnergy,
-            weightShift * .014 * gestureEnergy
+            -weightShift * .04 * (gestureEnergy + .25),
+            weightShift * .02 * (gestureEnergy + .2)
           ))
         );
       }
       rig.spine.quaternion.copy(rig.baseSpine).multiply(
         new Quaternion().setFromEuler(new Euler(
-          breath * .008,
-          -weightShift * .018 * gestureEnergy,
-          weightShift * .025 * gestureEnergy
+          breath * .01,
+          -weightShift * .03 * (gestureEnergy + .35),
+          weightShift * .035 * (gestureEnergy + .35)
         ))
       );
       rig.pelvis.quaternion.copy(rig.basePelvis).multiply(
         new Quaternion().setFromEuler(new Euler(
-          0,
-          weightShift * .014 * gestureEnergy,
-          -weightShift * (.016 + .026 * gestureEnergy)
+          idleBob * .012 * (1 - gestureEnergy),
+          weightShift * .03 * (gestureEnergy + .45),
+          -weightShift * (.035 + .05 * gestureEnergy)
         ))
       );
+      const leftLegPitch = gestureActive
+        ? weightShift * .22 + Math.sin(time * 15) * .08 * gestureArc
+        : idleBob * .12 + idleSway * .06;
+      const rightLegPitch = gestureActive
+        ? -weightShift * .22 - Math.sin(time * 15) * .08 * gestureArc
+        : -idleBob * .12 + idleSway * .05;
+      const leftLegRoll = gestureActive ? weightShift * .09 : idleSway * .055;
+      const rightLegRoll = gestureActive ? -weightShift * .09 : -idleSway * .055;
       rig.leftLeg.quaternion.copy(rig.baseLeftLeg).multiply(
-        new Quaternion().setFromEuler(new Euler(weightShift * .018 * gestureEnergy, 0, weightShift * .012))
+        new Quaternion().setFromEuler(new Euler(leftLegPitch, weightShift * .035 * (gestureEnergy + .4), leftLegRoll))
       );
       rig.rightLeg.quaternion.copy(rig.baseRightLeg).multiply(
-        new Quaternion().setFromEuler(new Euler(-weightShift * .018 * gestureEnergy, 0, -weightShift * .012))
+        new Quaternion().setFromEuler(new Euler(rightLegPitch, -weightShift * .035 * (gestureEnergy + .4), rightLegRoll))
       );
-      const hop = gestureActive ? Math.abs(Math.sin(time * 15)) * .018 * gestureArc : 0;
+      const hop = gestureActive
+        ? Math.abs(Math.sin(time * 15)) * .04 * gestureArc
+        : Math.abs(idleBob) * .018;
       model.position.y = hop;
     }
 

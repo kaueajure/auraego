@@ -5,7 +5,15 @@ import { env } from "./config.js";
 import { findUserById } from "./repositories/auth-repository.js";
 import { createMatch, finishRankedMatch, finishTrainingMatch, getMatchProfiles, markMatchActive } from "./repositories/match-repository.js";
 
-interface ConnectedUser { id: string; username: string; mmr: number; verified: boolean; region: string }
+interface ConnectedUser {
+  id: string;
+  username: string;
+  mmr: number;
+  verified: boolean;
+  region: string;
+  lookId: string;
+  cosmetics: Record<string, string>;
+}
 interface QueueEntry { socketId: string; user: ConnectedUser; joinedAt: number }
 interface Room {
   id: string; mode: "RANKED" | "TRAINING"; state: GameState; events: ArenaEvent[];
@@ -30,13 +38,58 @@ const serverFull = (socket: Socket) =>
 
 const capacityAvailable = () => rooms.size < env.MAX_CONCURRENT_ROOMS;
 
+function cosmeticsFromProfile(value: unknown): Record<string, string> {
+  let raw = value;
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw); } catch { return {}; }
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof entry === "string" && entry.trim()) out[key] = entry.trim();
+  }
+  return out;
+}
+
+/** Cosmetics são lidas no connect; precisa refrescar antes de fila/treino. */
+async function refreshConnectedUser(socketId: string): Promise<ConnectedUser | null> {
+  const current = socketUsers.get(socketId);
+  if (!current) return null;
+  try {
+    const user = await findUserById(current.id, true);
+    if (!user?.profile || user.status !== "ACTIVE") return current;
+    const cosmetics = cosmeticsFromProfile(user.profile.selectedCosmetics);
+    const next: ConnectedUser = {
+      ...current,
+      username: user.username,
+      mmr: user.profile.mmr,
+      verified: Boolean(user.emailVerifiedAt),
+      lookId: cosmetics.look || "emi",
+      cosmetics
+    };
+    socketUsers.set(socketId, next);
+    return next;
+  } catch {
+    return current;
+  }
+}
+
 export function attachRealtime(io: Server) {
   io.use(async (socket, next) => {
     try {
       const claims = verifyAccess(String(socket.handshake.auth.token || ""));
       const user = await findUserById(claims.sub, true);
       if (!user?.profile || user.status !== "ACTIVE") throw new Error("unauthorized");
-      const connected = { id: user.id, username: user.username, mmr: user.profile.mmr, verified: Boolean(user.emailVerifiedAt), region: String(socket.handshake.auth.region || "sa-east").slice(0, 24) };
+      const cosmetics = cosmeticsFromProfile(user.profile.selectedCosmetics);
+      const connected = {
+        id: user.id,
+        username: user.username,
+        mmr: user.profile.mmr,
+        verified: Boolean(user.emailVerifiedAt),
+        region: String(socket.handshake.auth.region || "sa-east").slice(0, 24),
+        lookId: cosmetics.look || "emi",
+        cosmetics
+      };
       socketUsers.set(socket.id, connected); socket.data.user = connected; next();
     } catch { next(new Error("UNAUTHORIZED")); }
   });
@@ -45,7 +98,7 @@ export function attachRealtime(io: Server) {
     socket.emit("clock:sync", { serverTime: Date.now() });
     socket.on("ping:measure", (sentAt: number, ack) => ack({ sentAt, serverTime: Date.now() }));
     socket.on("latency:report", (latency: number) => { if (Number.isFinite(latency)) socket.data.latency = Math.max(0, Math.min(latency, 2000)); });
-    socket.on("matchmaking:join", () => joinQueue(io, socket));
+    socket.on("matchmaking:join", () => void joinQueue(io, socket));
     socket.on("matchmaking:leave", () => leaveQueue(socket, true));
     socket.on("training:start", (payload: { difficulty?: BotDifficulty }) => void startTraining(io, socket, payload?.difficulty));
     socket.on("match:ready", () => {
@@ -79,8 +132,9 @@ function ensureTicker(io: Server) {
   }, 100);
 }
 
-function joinQueue(io: Server, socket: Socket) {
-  const user = socketUsers.get(socket.id)!;
+async function joinQueue(io: Server, socket: Socket) {
+  const user = await refreshConnectedUser(socket.id);
+  if (!user) return;
   if (!user.verified) return socket.emit("match:error", { code: "EMAIL_NOT_VERIFIED", message: "Verifique seu e-mail para jogar online." });
   if (queueHasUser(user.id) || playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_QUEUED", message: "Você já está em uma fila ou partida." });
   if (!capacityAvailable()) return serverFull(socket);
@@ -139,22 +193,33 @@ async function createRankedRoom(io: Server, first: QueueEntry, second: QueueEntr
     return;
   }
   try {
+    const [freshFirst, freshSecond] = await Promise.all([
+      refreshConnectedUser(first.socketId),
+      refreshConnectedUser(second.socketId)
+    ]);
+    const firstUser = freshFirst ?? first.user;
+    const secondUser = freshSecond ?? second.user;
     const seed = Math.floor(Math.random() * 2_000_000_000);
     const matchId = await createMatch("RANKED", seed, [
-      { userId: first.user.id, mmrBefore: first.user.mmr },
-      { userId: second.user.id, mmrBefore: second.user.mmr }
+      { userId: firstUser.id, mmrBefore: firstUser.mmr },
+      { userId: secondUser.id, mmrBefore: secondUser.mmr }
     ]);
-    const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
-    room.sockets.set(first.user.id, first.socketId);
-    room.sockets.set(second.user.id, second.socketId);
+    const room = makeRoom(matchId, "RANKED", seed, [firstUser, secondUser]);
+    room.sockets.set(firstUser.id, first.socketId);
+    room.sockets.set(secondUser.id, second.socketId);
     rooms.set(room.id, room);
-    for (const e of [first, second]) {
+    for (const e of [
+      { socketId: first.socketId, user: firstUser },
+      { socketId: second.socketId, user: secondUser }
+    ]) {
       playerRooms.set(e.user.id, room.id);
       io.sockets.sockets.get(e.socketId)?.join(room.id);
     }
     io.to(room.id).emit("match:found", {
       roomId: room.id,
-      players: [first.user, second.user].map(({ id, username, mmr }) => ({ id, username, mmr })),
+      players: [firstUser, secondUser].map(({ id, username, mmr, lookId, cosmetics }) => ({
+        id, username, mmr, lookId, cosmetics
+      })),
       seed
     });
     setTimeout(() => startRoom(io, room), 2500);
@@ -183,7 +248,8 @@ function requeue(io: Server, entry: QueueEntry) {
 }
 
 async function startTraining(io: Server, socket: Socket, requested?: BotDifficulty) {
-  const user = socketUsers.get(socket.id)!;
+  const user = await refreshConnectedUser(socket.id);
+  if (!user) return;
   if (playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_PLAYING", message: "Você já está em uma partida." });
   if (!capacityAvailable()) return serverFull(socket);
   const difficulty: BotDifficulty = ["INICIANTE", "NORMAL", "DIFICIL", "INSANO"].includes(requested || "") ? requested! : "NORMAL";
@@ -195,7 +261,9 @@ async function startTraining(io: Server, socket: Socket, requested?: BotDifficul
       username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro",
       mmr: user.mmr,
       verified: true,
-      region: user.region
+      region: user.region,
+      lookId: "phil",
+      cosmetics: { look: "phil" }
     }]);
     room.difficulty = difficulty;
     room.sockets.set(user.id, socket.id);
@@ -204,7 +272,9 @@ async function startTraining(io: Server, socket: Socket, requested?: BotDifficul
     socket.join(room.id);
     socket.emit("match:found", {
       roomId: room.id,
-      players: Object.values(room.state.players).map(p => ({ id: p.id, username: p.username })),
+      players: Object.values(room.state.players).map(p => ({
+        id: p.id, username: p.username, lookId: p.lookId, cosmetics: p.cosmetics
+      })),
       seed,
       training: true,
       difficulty

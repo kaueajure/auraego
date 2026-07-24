@@ -7,6 +7,7 @@ import type { CharacterAction } from "../components/Character";
 import { Logo } from "../components/Logo";
 import { LobbyShowcaseScene } from "../components/Scenes";
 import { getEquippedLook } from "../cosmetics";
+import { DEFAULT_CONTROLS, labelForCode, readControls, writeControls, type ControlBindings } from "../controls";
 import { gameSocket } from "../socket";
 import { useGame } from "../store";
 
@@ -32,6 +33,8 @@ export function LobbyPage() {
   const { user, logout } = useAuth(), navigate = useNavigate(), game = useGame();
   const [modal, setModal] = useState<"training" | "settings" | null>(null), [elapsed, setElapsed] = useState(0), [notice, setNotice] = useState("");
   const [pose, setPose] = useState<CharacterAction>(readPose);
+  const [controls, setControls] = useState<ControlBindings>(() => readControls());
+  const [listening, setListening] = useState<"six" | "seven" | null>(null);
   const equippedLook = useMemo(() => getEquippedLook(user?.profile.selectedCosmetics), [user?.profile.selectedCosmetics]);
   const arenaLabel = equippedLook.type === "phil"
     ? "ARENA NEON • DEPOIS DA MEIA-NOITE"
@@ -41,9 +44,11 @@ export function LobbyPage() {
         ? "LOBBY ABSURDA • EMOTE AO VIVO"
         : equippedLook.type === "cj"
           ? "GROVE STREET • LOS SANTOS"
-          : equippedLook.type === "order67"
+            : equippedLook.type === "order67"
             ? "PEDIDO 67 • SIX SEVEN"
-            : "QUADRA DO BAIRRO • FIM DE TARDE";
+            : equippedLook.type === "simao"
+              ? "OESTE • PÓ NA QUADRA"
+              : "QUADRA DO BAIRRO • FIM DE TARDE";
   const socket = gameSocket();
   useEffect(() => {
     const found = (payload: any) => { game.setRoom(payload.roomId); game.setStatus("FOUND"); navigate("/partida"); };
@@ -60,9 +65,31 @@ export function LobbyPage() {
     setPose(nextPose);
     window.localStorage.setItem("aura-ego:lobby-pose", nextPose);
   };
+  useEffect(() => {
+    if (!listening) return;
+    const onKey = (event: KeyboardEvent) => {
+      event.preventDefault();
+      if (event.code === "Escape") {
+        setListening(null);
+        return;
+      }
+      if (event.code.startsWith("Meta") || event.code === "Tab" || event.code === "CapsLock") return;
+      const next = { ...controls, [listening]: event.code } as ControlBindings;
+      if (next.six === next.seven) {
+        setNotice("Six e Seven precisam de teclas diferentes.");
+        setListening(null);
+        return;
+      }
+      setControls(next);
+      writeControls(next);
+      setListening(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [controls, listening]);
   return <main className="lobby">
-    <header className="topbar"><Logo compact /><nav aria-label="Menu principal"><button className="active">Jogar</button><button onClick={() => navigate("/personalizar")}>Personalizar</button><button onClick={() => navigate("/ranking")}>Ranking</button></nav><div className="profile-chip"><span>{user.username.slice(0, 2).toUpperCase()}</span><div><b>{user.username}</b><small>{RANK_LABELS[user.profile.rank]}</small></div><button aria-label="Sair" onClick={() => void logout()}>↗</button></div></header>
-    <section className="lobby-scene"><LobbyShowcaseScene look={equippedLook} pose={pose} /><div className="scene-vignette" /><div className="lobby-title"><span className="eyebrow">{arenaLabel}</span><h1>Defenda sua<br /><em>presença.</em></h1><span className="equipped-look-label">SKIN EQUIPADA <b>{equippedLook.name}</b></span></div></section>
+    <header className="topbar"><Logo compact /><nav aria-label="Menu principal"><button className="active">Jogar</button><button onClick={() => navigate("/personalizar")}>Personalizar</button><button onClick={() => navigate("/ranking")}>Ranking</button><button onClick={() => setModal("settings")}>Configurações</button></nav><div className="profile-chip"><span>{user.username.slice(0, 2).toUpperCase()}</span><div><b>{user.username}</b><small>{RANK_LABELS[user.profile.rank]}</small></div><button aria-label="Sair" onClick={() => void logout()}>↗</button></div></header>
+    <section className="lobby-scene"><LobbyShowcaseScene look={equippedLook} pose={pose} cosmetics={user.profile.selectedCosmetics} /><div className="scene-vignette" /><div className="lobby-title"><span className="eyebrow">{arenaLabel}</span><h1>Defenda sua<br /><em>presença.</em></h1><span className="equipped-look-label">SKIN EQUIPADA <b>{equippedLook.name}</b></span></div></section>
     <section className="pose-picker" aria-label="Poses do personagem">
       <div className="pose-picker-head"><span>POSE DE ENTRADA</span><strong>10 PRESETS</strong></div>
       <div>{POSES.map(item => <button key={item.id} className={pose === item.id ? "active" : ""} onClick={() => choosePose(item.id)} title={item.label} aria-label={item.label} aria-pressed={pose === item.id}><b>{item.mark}</b><span>{item.label}</span></button>)}</div>
@@ -80,5 +107,19 @@ export function LobbyPage() {
     {notice && <div className="toast" role="alert">{notice}<button onClick={() => setNotice("")}>×</button></div>}
     {game.status === "SEARCHING" && <div className="queue-overlay"><div className="queue-pulse"><span>6</span><i /><span>7</span></div><h2>Procurando presença à altura</h2><p>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")} • faixa ampliando com o tempo</p><button onClick={() => { socket.emit("matchmaking:leave"); game.setStatus("IDLE"); }}>Cancelar busca</button></div>}
     {modal === "training" && <div className="modal-backdrop" onMouseDown={() => setModal(null)}><div className="modal" onMouseDown={e => e.stopPropagation()}><button className="modal-close" onClick={() => setModal(null)}>×</button><span className="eyebrow">ESCOLHA O RIVAL</span><h2>Ritmo de treino</h2><div className="difficulty-grid">{(["INICIANTE", "NORMAL", "DIFICIL", "INSANO"] as BotDifficulty[]).map(d => <button key={d} className={game.difficulty === d ? "selected" : ""} onClick={() => game.setDifficulty(d)}><b>{d === "DIFICIL" ? "DIFÍCIL" : d}</b><small>{d === "INICIANTE" ? "Lento e tolerante" : d === "NORMAL" ? "Leitura equilibrada" : d === "DIFICIL" ? "Pune padrões" : "Preciso, ainda humano"}</small></button>)}</div><button className="primary" onClick={training}>Entrar na quadra →</button></div></div>}
+    {modal === "settings" && <div className="modal-backdrop" onMouseDown={() => { setListening(null); setModal(null); }}><div className="modal settings-modal" onMouseDown={e => e.stopPropagation()}><button className="modal-close" onClick={() => { setListening(null); setModal(null); }}>×</button><span className="eyebrow">CONTROLES</span><h2>Teclas Six Seven</h2><p className="settings-copy">Escolha quais teclas fazem o par. A bola rara pede uma sequência de setas separada.</p><div className="keybind-grid">
+      <button type="button" className={listening === "six" ? "listening" : ""} onClick={() => setListening("six")}>
+        <small>SIX · MÃO ESQUERDA</small>
+        <strong>{listening === "six" ? "…" : labelForCode(controls.six)}</strong>
+        <span>{listening === "six" ? "Pressione uma tecla" : "Clique para trocar"}</span>
+      </button>
+      <button type="button" className={listening === "seven" ? "listening" : ""} onClick={() => setListening("seven")}>
+        <small>SEVEN · MÃO DIREITA</small>
+        <strong>{listening === "seven" ? "…" : labelForCode(controls.seven)}</strong>
+        <span>{listening === "seven" ? "Pressione uma tecla" : "Clique para trocar"}</span>
+      </button>
+    </div>
+    <button className="text-button" type="button" onClick={() => { const next = { ...DEFAULT_CONTROLS }; setControls(next); writeControls(next); setListening(null); }}>Restaurar 6 e 7</button>
+    <button className="primary" type="button" onClick={() => { setListening(null); setModal(null); }}>Salvar →</button></div></div>}
   </main>;
 }

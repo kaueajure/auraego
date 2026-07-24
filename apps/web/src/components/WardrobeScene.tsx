@@ -1,7 +1,7 @@
 import { ContactShadows, Environment, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Suspense, useEffect, useMemo, useRef } from "react";
-import { Bone, Box3, BufferAttribute, Euler, MathUtils, Matrix4, Mesh, Quaternion, Vector3, type Group } from "three";
+import { Bone, Box3, BufferAttribute, Euler, MathUtils, Matrix4, Mesh, Quaternion, SkinnedMesh, Vector3, type Group, type Object3D } from "three";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 import type { WardrobeLook } from "../cosmetics";
 import { Character, type CharacterAction } from "./Character";
@@ -13,6 +13,7 @@ interface PlayerLookModelProps {
   action?: CharacterAction;
   scale?: number;
   chadMode?: boolean;
+  cosmetics?: Record<string, string> | null;
 }
 
 interface EmiArmRig {
@@ -130,6 +131,56 @@ function findAnimatedBones(model: Group, prefixes: string[]): AnimatedBone[] {
   return bones;
 }
 
+/** Remove empties do Sketchfab (scale ~100) que poluem o bounding box. */
+function stripEmptyHelpers(root: Object3D) {
+  const doomed: Object3D[] = [];
+  root.traverse(object => {
+    if (object instanceof Mesh || object instanceof Bone) return;
+    if (object.children.length > 0) return;
+    if (Math.abs(object.scale.x) > 10 || Math.abs(object.position.x) > 100) doomed.push(object);
+  });
+  for (const object of doomed) object.removeFromParent();
+}
+
+function boundsFromSkinnedMeshes(root: Object3D) {
+  const bounds = new Box3();
+  let found = false;
+  root.updateMatrixWorld(true);
+  root.traverse(object => {
+    if (!(object instanceof SkinnedMesh) && !(object instanceof Mesh)) return;
+    bounds.expandByObject(object);
+    found = true;
+  });
+  return found ? bounds : new Box3().setFromObject(root);
+}
+
+function fitCloneHeight(clone: Group, fitHeight: number) {
+  clone.updateMatrixWorld(true);
+  const bounds = boundsFromSkinnedMeshes(clone);
+  const size = bounds.getSize(new Vector3());
+  const center = bounds.getCenter(new Vector3());
+  const nextScale = fitHeight / Math.max(size.y, .001);
+  clone.scale.setScalar(nextScale);
+  clone.position.set(-center.x * nextScale, -bounds.min.y * nextScale, -center.z * nextScale);
+  clone.updateMatrixWorld(true);
+  const fitted = boundsFromSkinnedMeshes(clone);
+  clone.position.y -= fitted.min.y;
+  clone.updateMatrixWorld(true);
+}
+
+function prepareRiggedClone(scene: Group, fitHeight?: number) {
+  const clone = SkeletonUtils.clone(scene) as Group;
+  stripEmptyHelpers(clone);
+  clone.traverse(object => {
+    if (!(object instanceof Mesh)) return;
+    object.castShadow = true;
+    object.receiveShadow = true;
+    object.frustumCulled = false;
+  });
+  if (fitHeight) fitCloneHeight(clone, fitHeight);
+  return clone;
+}
+
 function findFingerRoots(model: Group, prefixes: string[]): Bone[] {
   const roots: Bone[] = [];
   const seen = new Set<string>();
@@ -189,21 +240,46 @@ function createAvatarArmRig(
       fingerRoots.push(bone);
     }
   }
-  if (fingerRoots.length < 2) throw new Error(`Rig incompleto: dedos de ${names.hand}`);
-  const fingerPoints = fingerRoots.map(bone =>
-    hand.worldToLocal(bone.getWorldPosition(new Vector3()))
-  );
-  // O polegar nasce de lado e distorce bastante o eixo longitudinal da mão.
-  // Nos rigs que o listam primeiro, usamos indicador–mindinho como referência.
-  const palmPoints = fingerRoots[0].name.toLowerCase().includes("thumb")
-    ? fingerPoints.slice(1)
-    : fingerPoints;
-  const usablePalm = palmPoints.length >= 2 ? palmPoints : fingerPoints;
-  const sourceFinger = usablePalm
-    .reduce((sum, point) => sum.add(point), new Vector3())
-    .normalize();
-  const acrossPalm = usablePalm.at(-1)!.clone().sub(usablePalm[0]).normalize();
-  const sourcePalm = sourceFinger.clone().cross(acrossPalm).normalize();
+
+  let sourceFinger: Vector3;
+  let sourcePalm: Vector3;
+  if (fingerRoots.length >= 2) {
+    const fingerPoints = fingerRoots.map(bone =>
+      hand.worldToLocal(bone.getWorldPosition(new Vector3()))
+    );
+    const palmPoints = fingerRoots[0].name.toLowerCase().includes("thumb")
+      ? fingerPoints.slice(1)
+      : fingerPoints;
+    const usablePalm = palmPoints.length >= 2 ? palmPoints : fingerPoints;
+    sourceFinger = usablePalm
+      .reduce((sum, point) => sum.add(point), new Vector3())
+      .normalize();
+    const acrossPalm = usablePalm.at(-1)!.clone().sub(usablePalm[0]).normalize();
+    sourcePalm = sourceFinger.clone().cross(acrossPalm);
+    if (sourcePalm.lengthSq() < .000001) sourcePalm.set(0, 0, 1);
+    else sourcePalm.normalize();
+  } else {
+    // Rigs sem dedos (ex.: Simão): eixo da mão a partir do antebraço → mão.
+    const forearmWorld = forearm.getWorldPosition(new Vector3());
+    const handWorld = hand.getWorldPosition(new Vector3());
+    const along = handWorld.clone().sub(forearmWorld);
+    if (along.lengthSq() < .000001) along.set(0, -1, 0);
+    else along.normalize();
+    const tipWorld = handWorld.clone().addScaledVector(along, .08);
+    sourceFinger = hand.worldToLocal(tipWorld);
+    if (sourceFinger.lengthSq() < .000001) sourceFinger.set(0, 1, 0);
+    else sourceFinger.normalize();
+    const upHint = hand.worldToLocal(handWorld.clone().add(new Vector3(0, 1, 0)));
+    sourcePalm = sourceFinger.clone().cross(upHint);
+    if (sourcePalm.lengthSq() < .000001) {
+      sourcePalm = sourceFinger.clone().cross(new Vector3(1, 0, 0));
+    }
+    if (sourcePalm.lengthSq() < .000001) sourcePalm.set(0, 0, 1);
+    else sourcePalm.normalize();
+    // Sem dedos o eixo é estimado: escolhe a normal que aponta mais pra cima no rest.
+    const palmWorld = sourcePalm.clone().transformDirection(hand.matrixWorld);
+    if (palmWorld.y < 0) sourcePalm.multiplyScalar(-1);
+  }
   if (flipPalm) sourcePalm.multiplyScalar(-1);
   return {
     upper,
@@ -288,14 +364,27 @@ function solveEmiArm(
 
   arm.forearm.quaternion.copy(desiredForearmLocal);
   model.updateMatrixWorld(true);
-  let desiredHandLocal = arm.baseHand;
+  let desiredHandLocal = arm.baseHand.clone();
   if (palmUpDirection) {
     const desiredFinger = palmUpDirection.clone().normalize();
-    const desiredPalmNormal = new Vector3(0, 1, 0);
-    const desiredRight = desiredFinger.clone().cross(desiredPalmNormal).normalize();
-    const sourceRight = arm.sourceFinger.clone().cross(arm.sourcePalm).normalize();
+    let desiredPalmNormal = new Vector3(0, 1, 0);
+    let desiredRight = desiredFinger.clone().cross(desiredPalmNormal);
+    if (desiredRight.lengthSq() < .000001) {
+      desiredRight = new Vector3(1, 0, 0).cross(desiredPalmNormal);
+    }
+    desiredRight.normalize();
+    desiredPalmNormal = desiredRight.clone().cross(desiredFinger).normalize();
+    if (desiredPalmNormal.y < 0) desiredPalmNormal.multiplyScalar(-1);
+
+    const sourceFinger = arm.sourceFinger.clone().normalize();
+    let sourcePalm = arm.sourcePalm.clone().normalize();
+    let sourceRight = sourceFinger.clone().cross(sourcePalm);
+    if (sourceRight.lengthSq() < .000001) sourceRight.set(1, 0, 0);
+    else sourceRight.normalize();
+    sourcePalm = sourceRight.clone().cross(sourceFinger).normalize();
+
     const sourceBasis = new Quaternion().setFromRotationMatrix(
-      new Matrix4().makeBasis(sourceRight, arm.sourceFinger, arm.sourcePalm)
+      new Matrix4().makeBasis(sourceRight, sourceFinger, sourcePalm)
     );
     const desiredBasis = new Quaternion().setFromRotationMatrix(
       new Matrix4().makeBasis(desiredRight, desiredFinger, desiredPalmNormal)
@@ -305,6 +394,19 @@ function solveEmiArm(
     const desiredHandWorld = modelWorld.multiply(desiredHandInModel);
     const handParentWorld = arm.hand.parent!.getWorldQuaternion(new Quaternion());
     desiredHandLocal = handParentWorld.invert().multiply(desiredHandWorld);
+
+    // Escolhe entre 0° e 180° no eixo dos dedos a orientação com palma mais pra cima.
+    const previousHand = arm.hand.quaternion.clone();
+    const flip = new Quaternion().setFromAxisAngle(sourceFinger, Math.PI);
+    arm.hand.quaternion.copy(desiredHandLocal);
+    model.updateMatrixWorld(true);
+    const palmA = sourcePalm.clone().transformDirection(arm.hand.matrixWorld).y;
+    const flipped = desiredHandLocal.clone().multiply(flip);
+    arm.hand.quaternion.copy(flipped);
+    model.updateMatrixWorld(true);
+    const palmB = sourcePalm.clone().transformDirection(arm.hand.matrixWorld).y;
+    if (palmB > palmA) desiredHandLocal.copy(flipped);
+    arm.hand.quaternion.copy(previousHand);
   }
 
   arm.upper.quaternion.copy(arm.baseUpper).slerp(desiredUpperLocal, influence);
@@ -320,28 +422,10 @@ function RiggedAvatarModel({ modelUrl, rigNames, action = "idle", chadMode = fal
   fitHeight?: number;
 }) {
   const { scene } = useGLTF(modelUrl);
-  const model = useMemo(() => {
-    const clone = SkeletonUtils.clone(scene) as Group;
-    clone.traverse(object => {
-      if (!(object instanceof Mesh)) return;
-      object.castShadow = true;
-      object.receiveShadow = true;
-      object.frustumCulled = false;
-    });
-    if (fitHeight) {
-      clone.updateMatrixWorld(true);
-      const bounds = new Box3().setFromObject(clone);
-      const size = bounds.getSize(new Vector3());
-      const center = bounds.getCenter(new Vector3());
-      const nextScale = fitHeight / Math.max(size.y, .001);
-      clone.scale.setScalar(nextScale);
-      clone.position.set(-center.x * nextScale, -bounds.min.y * nextScale, -center.z * nextScale);
-      clone.updateMatrixWorld(true);
-      const fitted = new Box3().setFromObject(clone);
-      clone.position.y -= fitted.min.y;
-    }
-    return clone;
-  }, [fitHeight, scene]);
+  const model = useMemo(
+    () => prepareRiggedClone(scene as Group, fitHeight),
+    [fitHeight, scene]
+  );
 
   const rig = useMemo(() => {
     const chest = model.getObjectByName(rigNames.chest) as Bone;
@@ -516,49 +600,248 @@ function RiggedAvatarModel({ modelUrl, rigNames, action = "idle", chadMode = fal
     const chinWeight = poseWeights.current.chin;
     const energy = gestureActive ? poseWeights.current.pose : 0;
     const breath = Math.sin(time * 1.65);
+    const idleBob = Math.sin(time * 2.35);
+    const idleSway = Math.sin(time * 1.05);
     const weightShift = gestureActive
       ? gestureArc * gestureDirection
       : chinActive
-        ? Math.sin(time * 1.25) * .35
-        : Math.sin(time * .85);
+        ? Math.sin(time * 1.25) * .55
+        : idleSway;
     const loseWeight = poseAction === "lose" ? poseWeights.current.pose : 0;
     const chestPose = rig.baseChest.clone().multiply(
       new Quaternion().setFromEuler(new Euler(
         -.08 * chinWeight + .16 * loseWeight + breath * .014,
-        .03 * chinWeight + weightShift * .03 * (energy + chinWeight * .4),
-        -.04 * chinWeight - weightShift * .022 * (energy + .2)
+        .03 * chinWeight + weightShift * .04 * (energy + chinWeight * .4 + .25),
+        -.04 * chinWeight - weightShift * .03 * (energy + .35)
       ))
     );
     const headPose = rig.baseHead.clone().multiply(
       new Quaternion().setFromEuler(new Euler(
         -.16 * chinWeight + .22 * loseWeight - breath * .01,
-        -.06 * chinWeight - weightShift * .04 * (energy + chinWeight * .5),
-        .06 * chinWeight + weightShift * .018 * energy
+        -.06 * chinWeight - weightShift * .05 * (energy + chinWeight * .5 + .2),
+        .06 * chinWeight + weightShift * .025 * (energy + .2)
       ))
     );
     rig.chest.quaternion.copy(chestPose);
     rig.head.quaternion.copy(headPose);
     rig.spine.quaternion.copy(rig.baseSpine).multiply(
       new Quaternion().setFromEuler(new Euler(
-        breath * .01 + .05 * chinWeight,
-        -weightShift * .022 * energy,
-        weightShift * .03 * energy
+        breath * .012 + .05 * chinWeight,
+        -weightShift * .03 * (energy + .35),
+        weightShift * .04 * (energy + .35)
       ))
     );
     rig.hips.quaternion.copy(rig.baseHips).multiply(
       new Quaternion().setFromEuler(new Euler(
-        0,
-        weightShift * .018 * energy,
-        -weightShift * (.022 + .035 * energy)
+        idleBob * .012 * (1 - energy),
+        weightShift * .035 * (energy + .45),
+        -weightShift * (.04 + .06 * energy)
       ))
     );
+    const leftLegPitch = gestureActive
+      ? weightShift * .22 + Math.sin(time * 15) * .08 * gestureArc
+      : chinActive
+        ? weightShift * .12
+        : idleBob * .12 + idleSway * .06;
+    const rightLegPitch = gestureActive
+      ? -weightShift * .22 - Math.sin(time * 15) * .08 * gestureArc
+      : chinActive
+        ? -weightShift * .12
+        : -idleBob * .12 + idleSway * .05;
+    const leftLegRoll = gestureActive ? weightShift * .09 : idleSway * .055;
+    const rightLegRoll = gestureActive ? -weightShift * .09 : -idleSway * .055;
     rig.leftLeg.quaternion.copy(rig.baseLeftLeg).multiply(
-      new Quaternion().setFromEuler(new Euler(weightShift * .022 * energy, 0, weightShift * .014))
+      new Quaternion().setFromEuler(new Euler(leftLegPitch, weightShift * .035 * (energy + .4), leftLegRoll))
     );
     rig.rightLeg.quaternion.copy(rig.baseRightLeg).multiply(
-      new Quaternion().setFromEuler(new Euler(-weightShift * .022 * energy, 0, -weightShift * .014))
+      new Quaternion().setFromEuler(new Euler(rightLegPitch, -weightShift * .035 * (energy + .4), rightLegRoll))
     );
-    const hop = gestureActive ? Math.abs(Math.sin(time * 15)) * .02 * gestureArc : chinActive ? Math.sin(time * 2.2) * .006 : 0;
+    const hop = gestureActive
+      ? Math.abs(Math.sin(time * 15)) * .04 * gestureArc
+      : chinActive
+        ? Math.sin(time * 2.2) * .012
+        : Math.abs(idleBob) * .018;
+    model.position.y = rig.baseModelY + hop;
+  });
+
+  return <primitive object={model} />;
+}
+
+/** Simão: skeleton Tripo (Y no osso, sem dedos). IK genérico estoura a pose — Euler local. */
+function SimaoModel({ action = "idle", chadMode = false }: { action?: CharacterAction; chadMode?: boolean }) {
+  const { scene } = useGLTF("/models/simao.glb");
+  const model = useMemo(() => prepareRiggedClone(scene as Group, 1.72), [scene]);
+  const rig = useMemo(() => {
+    const bone = (name: string) => {
+      const target = model.getObjectByName(name) as Bone | undefined;
+      if (!target) throw new Error(`Simão: osso ausente ${name}`);
+      return { bone: target, base: target.quaternion.clone() };
+    };
+    return {
+      leftUpper: bone("L_Upperarm"),
+      leftForearm: bone("L_Forearm"),
+      leftHand: bone("L_Hand"),
+      rightUpper: bone("R_Upperarm"),
+      rightForearm: bone("R_Forearm"),
+      rightHand: bone("R_Hand"),
+      chest: bone("Spine02"),
+      spine: bone("Spine01"),
+      head: bone("Head"),
+      hips: bone("Pelvis"),
+      leftThigh: bone("L_Thigh"),
+      leftCalf: bone("L_Calf"),
+      leftFoot: bone("L_Foot"),
+      rightThigh: bone("R_Thigh"),
+      rightCalf: bone("R_Calf"),
+      rightFoot: bone("R_Foot"),
+      baseModelY: model.position.y
+    };
+  }, [model]);
+
+  const poseWeight = useRef(0);
+  const chinWeight = useRef(0);
+  const gestureBalance = useRef(0);
+  const gestureResponsiveness = useRef(8);
+  const lastGestureAt = useRef(0);
+
+  useEffect(() => {
+    const now = performance.now();
+    if (action === "six" || action === "seven") {
+      const interval = lastGestureAt.current ? (now - lastGestureAt.current) / 1000 : .7;
+      gestureResponsiveness.current = MathUtils.clamp(
+        8 + Math.max(0, .7 - interval) * 24,
+        8,
+        24
+      );
+      lastGestureAt.current = now;
+    }
+  }, [action]);
+
+  useFrame(({ clock }, delta) => {
+    const time = clock.elapsedTime;
+    const gestureTarget = action === "six" ? 1 : action === "seven" ? -1 : 0;
+    gestureBalance.current = MathUtils.damp(
+      gestureBalance.current,
+      gestureTarget,
+      gestureTarget === 0 ? 7 : gestureResponsiveness.current,
+      delta
+    );
+    const seeSaw = gestureBalance.current;
+    const arc = Math.abs(seeSaw);
+    const gestureActive = action === "six" || action === "seven";
+    const gestureInMotion = gestureActive || arc > .006;
+    const chinActive = action === "chin" || chadMode && action === "idle";
+    poseWeight.current = MathUtils.damp(
+      poseWeight.current,
+      gestureInMotion || action === "victory" || action === "win" || action === "lose" ? 1 : 0,
+      gestureInMotion ? 14 : 9,
+      delta
+    );
+    chinWeight.current = MathUtils.damp(chinWeight.current, chinActive ? 1 : 0, chinActive ? 10 : 7, delta);
+
+    const energy = poseWeight.current;
+    const chin = chinWeight.current;
+    const idleBob = Math.sin(time * 2.35);
+    const idleSway = Math.sin(time * 1.05);
+    const bounce = Math.sin(time * 15) * .08 * Math.max(arc, .12);
+    const weightShift = gestureInMotion
+      ? seeSaw
+      : chinActive
+        ? Math.sin(time * 1.25) * .45
+        : idleSway;
+
+    const setLocal = (
+      part: { bone: Bone; base: Quaternion },
+      x: number,
+      y: number,
+      z: number
+    ) => {
+      part.bone.quaternion.copy(part.base).multiply(
+        new Quaternion().setFromEuler(new Euler(x, y, z))
+      );
+    };
+
+    // Braços: balança Six/Seven com palma = eixo Z do osso da mão (pra cima).
+    for (const [upper, forearm, hand, sign] of [
+      [rig.leftUpper, rig.leftForearm, rig.leftHand, 1] as const,
+      [rig.rightUpper, rig.rightForearm, rig.rightHand, -1] as const
+    ]) {
+      const up = -sign * seeSaw;
+      const lift = up * energy;
+      const upperX = MathUtils.lerp(
+        .08 * idleBob + .12 * chin,
+        .58 - lift * .5,
+        energy
+      );
+      const upperY = MathUtils.lerp(
+        sign * .04 * idleSway,
+        sign * (.06 + lift * .08),
+        energy
+      );
+      const upperZ = MathUtils.lerp(
+        sign * (-.12 + .05 * chin),
+        sign * (-.38 - lift * .35) + bounce * sign * .15 * energy,
+        energy
+      );
+      const foreX = MathUtils.lerp(
+        .08 + .1 * chin,
+        .75 + (1 - lift) * .35,
+        energy
+      );
+      const handY = MathUtils.lerp(sign * .15, sign * -1.22, energy);
+      setLocal(upper, upperX, upperY, upperZ);
+      setLocal(forearm, foreX, 0, sign * .04 * energy);
+      setLocal(hand, .05 * chin, handY, sign * .04 * energy);
+    }
+
+    setLocal(
+      rig.chest,
+      -.06 * chin + .02 * idleBob + .04 * energy,
+      weightShift * .05 * (energy + .3),
+      -weightShift * .04 * (energy + .25)
+    );
+    setLocal(
+      rig.spine,
+      .02 * idleBob + .03 * chin,
+      -weightShift * .04 * (energy + .35),
+      weightShift * .05 * (energy + .35)
+    );
+    setLocal(
+      rig.head,
+      -.12 * chin + .02 * idleBob,
+      -weightShift * .06 * (energy + .25),
+      weightShift * .03 * (energy + .2)
+    );
+    setLocal(
+      rig.hips,
+      idleBob * .02 * (1 - energy),
+      weightShift * .05 * (energy + .4),
+      -weightShift * (.05 + .06 * energy)
+    );
+
+    // Coxa / joelho / pé — sempre vivos no idle e no gesto.
+    const leftLift = gestureInMotion ? Math.max(0, -weightShift) : Math.max(0, -idleBob);
+    const rightLift = gestureInMotion ? Math.max(0, weightShift) : Math.max(0, idleBob);
+    setLocal(
+      rig.leftThigh,
+      idleBob * .1 + weightShift * .16 * (energy + .5) + leftLift * .12,
+      weightShift * .03,
+      idleSway * .05 + weightShift * .07
+    );
+    setLocal(
+      rig.rightThigh,
+      -idleBob * .1 - weightShift * .16 * (energy + .5) + rightLift * .12,
+      -weightShift * .03,
+      -idleSway * .05 - weightShift * .07
+    );
+    setLocal(rig.leftCalf, -(.07 + leftLift * .45 + Math.abs(idleBob) * .1 * (1 - leftLift)), 0, 0);
+    setLocal(rig.rightCalf, -(.07 + rightLift * .45 + Math.abs(idleBob) * .1 * (1 - rightLift)), 0, 0);
+    setLocal(rig.leftFoot, idleBob * .05 + leftLift * .22 + arc * .06, 0, idleSway * .03);
+    setLocal(rig.rightFoot, -idleBob * .05 + rightLift * .22 + arc * .06, 0, -idleSway * .03);
+
+    const hop = gestureInMotion
+      ? Math.abs(Math.sin(time * 15)) * .035 * arc
+      : Math.abs(idleBob) * .016 + chin * .008;
     model.position.y = rig.baseModelY + hop;
   });
 
@@ -604,7 +887,8 @@ function StaticPhilModel({ action = "idle" }: { action?: CharacterAction }) {
     const center = bounds.getCenter(new Vector3());
     return {
       model: clone,
-      normalizedScale: 1.72 / Math.max(size.y, .001),
+      // Phil (minion) fica ~1/3 da altura dos outros looks.
+      normalizedScale: (1.72 / 3) / Math.max(size.y, .001),
       offset: new Vector3(-center.x, -bounds.min.y, -center.z),
       surfaces: animatedSurfaces
     };
@@ -696,13 +980,23 @@ function StaticPhilModel({ action = "idle" }: { action?: CharacterAction }) {
       if (surface.normal) surface.normal.needsUpdate = true;
     });
 
+    const idleBob = Math.sin(time * 2.35);
+    const idleSway = Math.sin(time * 1.05);
     const targetTilt = Math.abs(gestureBalance.current) > .001
-      ? gestureBalance.current * .04
-      : action === "victory" ? -.035 : action === "chin" ? .05 : 0;
-    const targetTurn = action === "point" ? -.18 : action === "salute" ? .12 : action === "chin" ? -.08 : 0;
+      ? gestureBalance.current * .07
+      : action === "victory" ? -.035 : action === "chin" ? .05 : idleSway * .03;
+    const targetTurn = action === "point" ? -.18 : action === "salute" ? .12 : action === "chin" ? -.08 : idleSway * .02;
     group.current.rotation.z = MathUtils.damp(group.current.rotation.z, targetTilt, 8, delta);
     group.current.rotation.y = MathUtils.damp(group.current.rotation.y, targetTurn, 8, delta);
-    group.current.position.y = chinPose ? Math.sin(time * 2.2) * .01 : 0;
+    group.current.rotation.x = MathUtils.damp(
+      group.current.rotation.x,
+      idleBob * .025 + (chinPose ? .02 : 0),
+      8,
+      delta
+    );
+    group.current.position.y = chinPose
+      ? Math.sin(time * 2.2) * .014
+      : Math.abs(idleBob) * .016 + arc * .02;
     const pulse = 1 + arc * .012 + Math.sin(time * 1.7) * .003 * (1 - arc) + chinPose * .02;
     group.current.scale.setScalar(pulse);
   });
@@ -718,7 +1012,8 @@ export function PlayerLookModel({
   facing = 0,
   action = "idle",
   scale = 1,
-  chadMode = false
+  chadMode = false,
+  cosmetics
 }: PlayerLookModelProps) {
   if (look.type === "emi") {
     return <group position={position} rotation-y={facing} scale={scale}>
@@ -774,6 +1069,12 @@ export function PlayerLookModel({
     </group>;
   }
 
+  if (look.type === "simao") {
+    return <group position={position} rotation-y={facing} scale={scale}>
+      <SimaoModel action={action} chadMode={chadMode} />
+    </group>;
+  }
+
   return <Character
     color={look.color}
     accent={look.accent}
@@ -789,7 +1090,7 @@ export function PlayerLookModel({
   />;
 }
 
-function Turntable({ look }: { look: WardrobeLook }) {
+function Turntable({ look, cosmetics }: { look: WardrobeLook; cosmetics?: Record<string, string> | null }) {
   const group = useRef<Group>(null);
   useFrame((_, delta) => {
     if (!group.current) return;
@@ -798,11 +1099,11 @@ function Turntable({ look }: { look: WardrobeLook }) {
   });
 
   return <group ref={group} rotation-y={-.2}>
-    <PlayerLookModel look={look} action="idle" scale={1.02} />
+    <PlayerLookModel look={look} action="idle" scale={1.02} cosmetics={cosmetics} />
   </group>;
 }
 
-export function WardrobeScene({ look }: { look: WardrobeLook }) {
+export function WardrobeScene({ look, cosmetics }: { look: WardrobeLook; cosmetics?: Record<string, string> | null }) {
   return <Canvas
     shadows
     dpr={[1, 1.75]}
@@ -820,7 +1121,7 @@ export function WardrobeScene({ look }: { look: WardrobeLook }) {
     />
     <spotLight position={[3, 3.5, 2]} intensity={16} angle={.4} penumbra={.85} color="#e97648" />
     <Suspense fallback={null}>
-      <Turntable look={look} />
+      <Turntable look={look} cosmetics={cosmetics} />
       <ContactShadows position={[0, .006, 0]} opacity={.52} scale={3.2} blur={2.6} far={3} />
       <Environment preset="studio" />
     </Suspense>
@@ -842,3 +1143,5 @@ useGLTF.preload("/models/phil.glb");
 useGLTF.preload("/models/banana.glb");
 useGLTF.preload("/models/cj.glb");
 useGLTF.preload("/models/order-67.glb");
+useGLTF.preload("/models/simao.glb");
+

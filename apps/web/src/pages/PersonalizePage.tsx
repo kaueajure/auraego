@@ -12,12 +12,24 @@ import {
   lookIdFromCosmetics,
   WARDROBE_LOOKS as LOOKS
 } from "../cosmetics";
+import { gameSocket } from "../socket";
 
 function Icon({ name }: { name: "rotate" | "zoom" | "check" | "lock" }) {
   if (name === "rotate") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 8.5A8 8 0 1 1 4 14m.5-5.5V4m0 4.5H9" /></svg>;
   if (name === "zoom") return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 5 5M10.5 8v5m-2.5-2.5h5" /></svg>;
   if (name === "lock") return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>;
+}
+
+function lookBadge(type: string) {
+  if (type === "emi") return "EMI";
+  if (type === "charlie") return "CM";
+  if (type === "banana") return "BN";
+  if (type === "phil") return "PH";
+  if (type === "cj") return "CJ";
+  if (type === "order67") return "67";
+  if (type === "simao") return "JS";
+  return "A&E";
 }
 
 export function PersonalizePage() {
@@ -49,6 +61,9 @@ export function PersonalizePage() {
         updateUser(fresh);
         setEquippedId(selected.id);
         setSaved(true);
+        // Socket guarda cosmetics na conexão; força reauth na próxima partida.
+        const socket = gameSocket();
+        if (socket.connected) socket.disconnect();
         window.setTimeout(() => setSaved(false), 2200);
       })
       .catch(() => {})
@@ -87,7 +102,7 @@ export function PersonalizePage() {
           exit={{ opacity: 0, scale: 1.03 }}
           transition={{ duration: .28 }}
         >
-          <WardrobeScene look={selected} />
+          <WardrobeScene look={selected} cosmetics={user.profile.selectedCosmetics} />
         </motion.div>
       </AnimatePresence>
       <div className="preview-index">0{LOOKS.findIndex(look => look.id === selected.id) + 1}</div>
@@ -126,7 +141,7 @@ export function PersonalizePage() {
         >
           <span className="skin-card-no">0{index + 1}</span>
           <div className="skin-card-art" style={{ "--skin-a": look.swatches[0], "--skin-b": look.swatches[1] } as React.CSSProperties}>
-            <span>{look.type === "emi" ? "EMI" : look.type === "charlie" ? "CM" : look.type === "banana" ? "BN" : look.type === "phil" ? "PH" : look.type === "cj" ? "CJ" : look.type === "order67" ? "67" : "A&E"}</span>
+            <span>{lookBadge(look.type)}</span>
           </div>
           <div><small>{look.rarity}</small><b>{look.name}</b><span>{look.collection}</span></div>
           {equippedId === look.id && <i className="equipped-mark"><Icon name="check" /></i>}

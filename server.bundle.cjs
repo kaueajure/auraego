@@ -114,9 +114,11 @@ var EVENT_TEMPLATES = [
   { kind: "AURA_COLETIVA", name: "Aura coletiva", duration: 3800, hitWindow: [1800, 3100], perfectWindow: [2350, 2700], risk: 12, reward: 26, penalty: 10, shouldAct: true, animation: "crowd-wave", sound: "stomp", botRule: "ACT", activation: "baseline" },
   { kind: "QUEBRA_CLIMA", name: "Quebra de clima", duration: 2600, hitWindow: [2200, 2500], perfectWindow: [2320, 2440], risk: 16, reward: 18, penalty: 18, shouldAct: false, animation: "ball-roll", sound: "ball-bounce", botRule: "WAIT", activation: "after-combo" }
 ];
-var createPlayer = (id, username) => ({
+var createPlayer = (id, username, lookId = "emi", cosmetics = {}) => ({
   id,
   username,
+  lookId,
+  cosmetics: { ...cosmetics },
   aura: 0,
   ego: 0,
   combo: 0,
@@ -160,7 +162,10 @@ function createGame(seed, players, now) {
     roundEndsAt: now + 48e3,
     eventIndex: 0,
     currentEvent: null,
-    players: Object.fromEntries(players.map((p) => [p.id, createPlayer(p.id, p.username)])),
+    players: Object.fromEntries(players.map((p) => [
+      p.id,
+      createPlayer(p.id, p.username, p.lookId ?? "emi", p.cosmetics ?? {})
+    ])),
     roundWins: Object.fromEntries(players.map((p) => [p.id, 0])),
     winnerId: null,
     version: 1
@@ -1016,13 +1021,59 @@ var safeState = (room) => ({
 });
 var serverFull = (socket) => socket.emit("match:error", { code: "SERVER_FULL", message: "A quadra est\xE1 lotada. Tente novamente em instantes." });
 var capacityAvailable = () => rooms.size < env.MAX_CONCURRENT_ROOMS;
+function cosmeticsFromProfile(value) {
+  let raw = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (typeof entry === "string" && entry.trim()) out[key] = entry.trim();
+  }
+  return out;
+}
+async function refreshConnectedUser(socketId) {
+  const current = socketUsers.get(socketId);
+  if (!current) return null;
+  try {
+    const user = await findUserById(current.id, true);
+    if (!user?.profile || user.status !== "ACTIVE") return current;
+    const cosmetics = cosmeticsFromProfile(user.profile.selectedCosmetics);
+    const next = {
+      ...current,
+      username: user.username,
+      mmr: user.profile.mmr,
+      verified: Boolean(user.emailVerifiedAt),
+      lookId: cosmetics.look || "emi",
+      cosmetics
+    };
+    socketUsers.set(socketId, next);
+    return next;
+  } catch {
+    return current;
+  }
+}
 function attachRealtime(io2) {
   io2.use(async (socket, next) => {
     try {
       const claims = verifyAccess(String(socket.handshake.auth.token || ""));
       const user = await findUserById(claims.sub, true);
       if (!user?.profile || user.status !== "ACTIVE") throw new Error("unauthorized");
-      const connected = { id: user.id, username: user.username, mmr: user.profile.mmr, verified: Boolean(user.emailVerifiedAt), region: String(socket.handshake.auth.region || "sa-east").slice(0, 24) };
+      const cosmetics = cosmeticsFromProfile(user.profile.selectedCosmetics);
+      const connected = {
+        id: user.id,
+        username: user.username,
+        mmr: user.profile.mmr,
+        verified: Boolean(user.emailVerifiedAt),
+        region: String(socket.handshake.auth.region || "sa-east").slice(0, 24),
+        lookId: cosmetics.look || "emi",
+        cosmetics
+      };
       socketUsers.set(socket.id, connected);
       socket.data.user = connected;
       next();
@@ -1036,7 +1087,7 @@ function attachRealtime(io2) {
     socket.on("latency:report", (latency) => {
       if (Number.isFinite(latency)) socket.data.latency = Math.max(0, Math.min(latency, 2e3));
     });
-    socket.on("matchmaking:join", () => joinQueue(io2, socket));
+    socket.on("matchmaking:join", () => void joinQueue(io2, socket));
     socket.on("matchmaking:leave", () => leaveQueue(socket, true));
     socket.on("training:start", (payload) => void startTraining(io2, socket, payload?.difficulty));
     socket.on("match:ready", () => {
@@ -1072,8 +1123,9 @@ function ensureTicker(io2) {
     }
   }, 100);
 }
-function joinQueue(io2, socket) {
-  const user = socketUsers.get(socket.id);
+async function joinQueue(io2, socket) {
+  const user = await refreshConnectedUser(socket.id);
+  if (!user) return;
   if (!user.verified) return socket.emit("match:error", { code: "EMAIL_NOT_VERIFIED", message: "Verifique seu e-mail para jogar online." });
   if (queueHasUser(user.id) || playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_QUEUED", message: "Voc\xEA j\xE1 est\xE1 em uma fila ou partida." });
   if (!capacityAvailable()) return serverFull(socket);
@@ -1125,22 +1177,37 @@ async function createRankedRoom(io2, first, second) {
     return;
   }
   try {
+    const [freshFirst, freshSecond] = await Promise.all([
+      refreshConnectedUser(first.socketId),
+      refreshConnectedUser(second.socketId)
+    ]);
+    const firstUser = freshFirst ?? first.user;
+    const secondUser = freshSecond ?? second.user;
     const seed = Math.floor(Math.random() * 2e9);
     const matchId = await createMatch("RANKED", seed, [
-      { userId: first.user.id, mmrBefore: first.user.mmr },
-      { userId: second.user.id, mmrBefore: second.user.mmr }
+      { userId: firstUser.id, mmrBefore: firstUser.mmr },
+      { userId: secondUser.id, mmrBefore: secondUser.mmr }
     ]);
-    const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
-    room.sockets.set(first.user.id, first.socketId);
-    room.sockets.set(second.user.id, second.socketId);
+    const room = makeRoom(matchId, "RANKED", seed, [firstUser, secondUser]);
+    room.sockets.set(firstUser.id, first.socketId);
+    room.sockets.set(secondUser.id, second.socketId);
     rooms.set(room.id, room);
-    for (const e of [first, second]) {
+    for (const e of [
+      { socketId: first.socketId, user: firstUser },
+      { socketId: second.socketId, user: secondUser }
+    ]) {
       playerRooms.set(e.user.id, room.id);
       io2.sockets.sockets.get(e.socketId)?.join(room.id);
     }
     io2.to(room.id).emit("match:found", {
       roomId: room.id,
-      players: [first.user, second.user].map(({ id, username, mmr }) => ({ id, username, mmr })),
+      players: [firstUser, secondUser].map(({ id, username, mmr, lookId, cosmetics }) => ({
+        id,
+        username,
+        mmr,
+        lookId,
+        cosmetics
+      })),
       seed
     });
     setTimeout(() => startRoom(io2, room), 2500);
@@ -1167,7 +1234,8 @@ function requeue(io2, entry) {
   io2.to(entry.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: Date.now(), range: 100 });
 }
 async function startTraining(io2, socket, requested) {
-  const user = socketUsers.get(socket.id);
+  const user = await refreshConnectedUser(socket.id);
+  if (!user) return;
   if (playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_PLAYING", message: "Voc\xEA j\xE1 est\xE1 em uma partida." });
   if (!capacityAvailable()) return serverFull(socket);
   const difficulty = ["INICIANTE", "NORMAL", "DIFICIL", "INSANO"].includes(requested || "") ? requested : "NORMAL";
@@ -1179,7 +1247,9 @@ async function startTraining(io2, socket, requested) {
       username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro",
       mmr: user.mmr,
       verified: true,
-      region: user.region
+      region: user.region,
+      lookId: "phil",
+      cosmetics: { look: "phil" }
     }]);
     room.difficulty = difficulty;
     room.sockets.set(user.id, socket.id);
@@ -1188,7 +1258,12 @@ async function startTraining(io2, socket, requested) {
     socket.join(room.id);
     socket.emit("match:found", {
       roomId: room.id,
-      players: Object.values(room.state.players).map((p) => ({ id: p.id, username: p.username })),
+      players: Object.values(room.state.players).map((p) => ({
+        id: p.id,
+        username: p.username,
+        lookId: p.lookId,
+        cosmetics: p.cosmetics
+      })),
       seed,
       training: true,
       difficulty

@@ -20,3 +20,20 @@
 @media(max-width:520px){.profile-chip div{display:none}.customize-copy{top:91px}.wardrobe-preview{height:500px}.look-detail{bottom:9%;left:18px;right:auto;width:150px}.preview-controls{display:none}.skin-list{grid-template-columns:1fr}.drawer-head{align-items:center}}
 @media(max-width:800px){.lobby-title h1{font-size:48px}.equipped-look-label{display:none}.pose-picker{left:3%;right:3%;bottom:calc(2% + 234px);width:auto;padding:8px}.pose-picker-head{margin-bottom:5px}.pose-picker button{height:34px}.pose-picker button span{display:none}.pose-picker button b{font-size:12px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+.settings-copy{margin:-8px 0 18px;font-size:12px;line-height:1.45;color:#776d60}
+.keybind-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.keybind-grid button{display:grid;gap:4px;text-align:left;padding:16px;border:1px solid #c9bdab;background:#eee3d2;border-radius:6px;color:inherit}
+.keybind-grid button.listening{border-color:var(--orange);box-shadow:inset 4px 0 var(--orange);background:#f6ebdb}
+.keybind-grid small{font-size:8px;letter-spacing:1.2px;color:#8a7d6c}
+.keybind-grid strong{font-family:"Barlow Condensed";font-size:34px;line-height:1}
+.keybind-grid span{font-size:11px;color:#776d60}
+.settings-modal .text-button{display:block;margin:0 0 12px;background:none;border:0;color:#8a7d6c;font-size:12px;text-decoration:underline;padding:0}
+.orb-challenge{position:absolute;z-index:14;left:50%;bottom:19%;transform:translateX(-50%);display:grid;justify-items:center;gap:6px;padding:12px 16px 11px;border:1px solid rgba(255,210,120,.45);background:linear-gradient(160deg,rgba(18,14,11,.94),rgba(72,48,18,.88));box-shadow:0 16px 40px #0007;animation:hud-feedback .24s ease-out both}
+.orb-challenge small{font-size:7px;letter-spacing:1.8px;color:var(--gold)}
+.orb-challenge>span{font-size:10px;color:#d7c7ad}
+.orb-challenge-keys{display:flex;gap:8px}
+.orb-challenge-keys kbd{min-width:48px;height:48px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.28);border-radius:8px;background:rgba(255,255,255,.06);font-family:"Barlow Condensed";font-size:26px;font-weight:700;color:#fff}
+.orb-challenge-keys kbd.next{border-color:var(--gold);background:rgba(243,184,63,.22);box-shadow:0 0 18px rgba(243,184,63,.28)}
+.orb-challenge-keys kbd.done{opacity:.45;border-color:rgba(94,208,151,.55);color:#9fe7bf}
+@media(max-width:800px){.keybind-grid{grid-template-columns:1fr}.orb-challenge{bottom:22%;padding:10px 12px}.orb-challenge-keys kbd{min-width:42px;height:42px;font-size:22px}}

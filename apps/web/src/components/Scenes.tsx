@@ -6,7 +6,6 @@ import type { WardrobeLook } from "../cosmetics";
 import { Character, type CharacterAction } from "./Character";
 import { PlayerLookModel } from "./WardrobeScene";
 
-const noop = () => {};
 export type ArenaVariant = 0 | 1 | 2;
 
 const ARENAS = [
@@ -89,21 +88,14 @@ function FloatingNumbers() {
   </group></Float>;
 }
 
-function SpecialAuraOrb({ position, onCollect }: { position: [number, number, number]; onCollect: () => void }) {
+function SpecialAuraOrb({ position }: { position: [number, number, number] }) {
   const orb = useRef<Group>(null);
-  const collected = useRef(false);
   useFrame(({ clock }) => {
     if (!orb.current) return;
     const time = clock.elapsedTime;
     orb.current.rotation.y = time * 1.35;
     orb.current.rotation.z = Math.sin(time * 1.6) * .12;
   });
-  const collect = () => {
-    if (collected.current) return;
-    collected.current = true;
-    document.body.style.cursor = "";
-    onCollect();
-  };
   return <Float speed={2} floatIntensity={.45} rotationIntensity={.18}>
     <group ref={orb} position={position}>
       <pointLight intensity={10} distance={4.5} color="#ffd45e" />
@@ -150,17 +142,7 @@ function SpecialAuraOrb({ position, onCollect }: { position: [number, number, nu
       })}
 
       <Text position={[0, 0, .285]} fontSize={.105} fontWeight={800} color="#2a1706" anchorX="center" anchorY="middle">GIGA</Text>
-      <Text position={[0, -.56, .02]} fontSize={.1} color="#fff2be" anchorX="center" anchorY="middle">COMBO 25 • PEGUE</Text>
-
-      <mesh
-        onClick={event => { event.stopPropagation(); collect(); }}
-        onPointerDown={event => { event.stopPropagation(); collect(); }}
-        onPointerOver={event => { event.stopPropagation(); document.body.style.cursor = "pointer"; }}
-        onPointerOut={() => { document.body.style.cursor = ""; }}
-      >
-        <sphereGeometry args={[.62, 24, 18]} />
-        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-      </mesh>
+      <Text position={[0, -.56, .02]} fontSize={.1} color="#fff2be" anchorX="center" anchorY="middle">COMBO 50 • SEQ</Text>
     </group>
   </Float>;
 }
@@ -173,11 +155,12 @@ export function AuthScene() {
   </Canvas>;
 }
 
-export function LobbyShowcaseScene({ look, pose }: {
+export function LobbyShowcaseScene({ look, pose, cosmetics }: {
   look: WardrobeLook;
   pose: CharacterAction;
+  cosmetics?: Record<string, string> | null;
 }) {
-  const variant: ArenaVariant = look.type === "phil" ? 2 : look.type === "charlie" || look.type === "banana" || look.type === "cj" || look.type === "order67" ? 1 : 0;
+  const variant: ArenaVariant = look.type === "phil" ? 2 : look.type === "charlie" || look.type === "banana" || look.type === "cj" || look.type === "order67" || look.type === "simao" ? 1 : 0;
   const arena = ARENAS[variant];
   return <Canvas shadows dpr={[1, 1.65]} camera={{ position: [0, 2.35, 6.15], fov: 38 }}>
     <CameraTarget y={1.12} />
@@ -188,7 +171,7 @@ export function LobbyShowcaseScene({ look, pose }: {
     <spotLight position={[3.5, 5, 3]} intensity={18} angle={.36} penumbra={.85} color={arena.light} />
     <Court variant={variant} />
     <Suspense fallback={null}>
-      <PlayerLookModel look={look} position={[0, 0, .15]} facing={0} action={pose} scale={1.28} chadMode={pose === "chin"} />
+      <PlayerLookModel look={look} position={[0, 0, .15]} facing={0} action={pose} scale={1.28} chadMode={pose === "chin"} cosmetics={cosmetics} />
     </Suspense>
     <ContactShadows position={[0, .012, .15]} opacity={.45} scale={5} blur={2.4} far={4} />
     <Suspense fallback={null}>
@@ -203,11 +186,13 @@ interface ArenaSceneProps {
   playerAction?: CharacterAction;
   opponentAction?: CharacterAction;
   playerLook?: WardrobeLook;
+  opponentLook?: WardrobeLook;
+  playerCosmetics?: Record<string, string> | null;
+  opponentCosmetics?: Record<string, string> | null;
   playerChad?: boolean;
   playerScale?: number;
   specialOrbVisible?: boolean;
   specialOrbPosition?: [number, number, number];
-  onSpecialOrbClick?: () => void;
   variant?: ArenaVariant;
 }
 
@@ -215,11 +200,13 @@ export function ArenaScene({
   playerAction = "idle",
   opponentAction = "idle",
   playerLook,
+  opponentLook,
+  playerCosmetics,
+  opponentCosmetics,
   playerChad = false,
   playerScale = 1,
   specialOrbVisible = false,
   specialOrbPosition = [-.55, 2.25, .7],
-  onSpecialOrbClick = noop,
   variant = 0
 }: ArenaSceneProps) {
   const arena = ARENAS[variant];
@@ -232,10 +219,12 @@ export function ArenaScene({
     <Suspense fallback={null}>
       <Court variant={variant} />
       {playerLook
-        ? <PlayerLookModel look={playerLook} position={[-1.52, 0, 0]} facing={.12} action={playerAction} chadMode={playerChad} scale={1.16 * playerScale} />
+        ? <PlayerLookModel look={playerLook} position={[-1.52, 0, 0]} facing={.12} action={playerAction} chadMode={playerChad} scale={1.16 * playerScale} cosmetics={playerCosmetics} />
         : <Character position={[-1.52, 0, 0]} facing={.12} action={playerAction} chadMode={playerChad} scale={1.16 * playerScale} />}
-      <Character position={[1.52, 0, 0]} facing={-.12} action={opponentAction} color="#397c70" accent="#f08b52" skin="#7c4a35" scale={1.16} />
-      {specialOrbVisible ? <SpecialAuraOrb position={specialOrbPosition} onCollect={onSpecialOrbClick} /> : null}
+      {opponentLook
+        ? <PlayerLookModel look={opponentLook} position={[1.52, 0, 0]} facing={-.12} action={opponentAction} scale={1.16} cosmetics={opponentCosmetics} />
+        : <Character position={[1.52, 0, 0]} facing={-.12} action={opponentAction} color="#397c70" accent="#f08b52" skin="#7c4a35" scale={1.16} />}
+      {specialOrbVisible ? <SpecialAuraOrb position={specialOrbPosition} /> : null}
       <ContactShadows position={[0, .012, 0]} opacity={.38} scale={8} blur={2.2} far={4} />
       <RoundedBox args={[3, .8, .12]} radius={.08} position={[0, 3.25, -4.55]}><meshStandardMaterial color="#191713" /></RoundedBox>
       <Text position={[0, 3.25, -4.45]} fontSize={.33} color="#f5b940">AURA  •  EGO</Text>

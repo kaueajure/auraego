@@ -14,7 +14,8 @@ export interface ArenaEvent {
 }
 
 export interface PlayerState {
-  id: string; username: string; aura: number; ego: number; combo: number;
+  id: string; username: string; lookId: string; cosmetics: Record<string, string>;
+  aura: number; ego: number; combo: number;
   multiplier: number; orbClaims: number; lastInputAt: number; lastSequence: number;
   pendingSixAt: number | null; inputTimes: number[]; identicalIntervals: number;
   mistakes: number; perfectActions: number; spamViolations: number; successfulActions: number;
@@ -50,8 +51,13 @@ const EVENT_TEMPLATES: Omit<ArenaEvent, "id" | "startsAt">[] = [
   { kind: "QUEBRA_CLIMA", name: "Quebra de clima", duration: 2600, hitWindow: [2200, 2500], perfectWindow: [2320, 2440], risk: 16, reward: 18, penalty: 18, shouldAct: false, animation: "ball-roll", sound: "ball-bounce", botRule: "WAIT", activation: "after-combo" }
 ];
 
-export const createPlayer = (id: string, username: string): PlayerState => ({
-  id, username, aura: 0, ego: 0, combo: 0, multiplier: 1, orbClaims: 0, lastInputAt: 0,
+export const createPlayer = (
+  id: string,
+  username: string,
+  lookId = "emi",
+  cosmetics: Record<string, string> = {}
+): PlayerState => ({
+  id, username, lookId, cosmetics: { ...cosmetics }, aura: 0, ego: 0, combo: 0, multiplier: 1, orbClaims: 0, lastInputAt: 0,
   lastSequence: 0, pendingSixAt: null, inputTimes: [], identicalIntervals: 0,
   mistakes: 0, perfectActions: 0, spamViolations: 0, successfulActions: 0,
   totalActions: 0, highestCombo: 0, egoBrokenUntil: 0
@@ -75,11 +81,18 @@ export function generateEvents(seed: number, roundStart: number, count = 12): Ar
   });
 }
 
-export function createGame(seed: number, players: Array<{ id: string; username: string }>, now: number): GameState {
+export function createGame(
+  seed: number,
+  players: Array<{ id: string; username: string; lookId?: string; cosmetics?: Record<string, string> }>,
+  now: number
+): GameState {
   return {
     seed, phase: "COUNTDOWN", round: 1, bestOf: 3, roundEndsAt: now + 48_000,
     eventIndex: 0, currentEvent: null,
-    players: Object.fromEntries(players.map(p => [p.id, createPlayer(p.id, p.username)])),
+    players: Object.fromEntries(players.map(p => [
+      p.id,
+      createPlayer(p.id, p.username, p.lookId ?? "emi", p.cosmetics ?? {})
+    ])),
     roundWins: Object.fromEntries(players.map(p => [p.id, 0])), winnerId: null, version: 1
   };
 }
