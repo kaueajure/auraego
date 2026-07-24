@@ -1,4 +1,5 @@
 import type { RowDataPacket } from "mysql2/promise";
+import { rankForAura } from "@aura-ego/shared";
 import { pool } from "../db.js";
 import { findUserById, type Profile, type User } from "./auth-repository.js";
 
@@ -7,7 +8,8 @@ interface MatchRow extends RowDataPacket {
   result: "WIN" | "LOSS" | "DRAW" | null; aura: number; highestCombo: number; accuracy: number;
 }
 interface RankingRow extends RowDataPacket {
-  username: string; mmr: number; currentRank: string; wins: number; losses: number; totalAura: number;
+  username: string; mmr: number; currentRank: string; wins: number; losses: number;
+  totalAura: number; winStreak: number; level: number;
 }
 
 export const getUserProfile = (id: string): Promise<User | null> => findUserById(id, true);
@@ -47,14 +49,21 @@ export async function listUserMatches(userId: string) {
 export async function listRankings() {
   const [rows] = await pool.query<RankingRow[]>(
     `SELECT u.username, p.mmr, p.current_rank AS currentRank, p.wins, p.losses,
-      p.total_aura AS totalAura
+      p.total_aura AS totalAura, p.win_streak AS winStreak, p.level
      FROM player_profiles p
      JOIN users u ON u.id = p.user_id
-     ORDER BY p.mmr DESC, p.wins DESC
-     LIMIT 100`
+     WHERE u.status = 'ACTIVE'
+     ORDER BY p.total_aura DESC, p.wins DESC, p.mmr DESC, u.username ASC`
   );
   return rows.map((row, index) => ({
-    position: index + 1, username: row.username, mmr: row.mmr, rank: row.currentRank,
-    wins: row.wins, losses: row.losses, totalAura: Number(row.totalAura)
+    position: index + 1,
+    username: row.username,
+    mmr: row.mmr,
+    rank: rankForAura(Number(row.totalAura)),
+    wins: row.wins,
+    losses: row.losses,
+    totalAura: Number(row.totalAura),
+    winStreak: row.winStreak,
+    level: row.level
   }));
 }

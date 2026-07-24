@@ -1,5 +1,5 @@
 import type { Server, Socket } from "socket.io";
-import { applyInput, botDecision, createGame, generateEvents, mmrDelta, type ArenaEvent, type BotDifficulty, type GameState, type InputIntent } from "@aura-ego/shared";
+import { applyInput, botDecision, collectAuraOrb, createGame, generateEvents, mmrDelta, rankForAura, type ArenaEvent, type BotDifficulty, type GameState, type InputIntent } from "@aura-ego/shared";
 import { verifyAccess } from "./security.js";
 import { env } from "./config.js";
 import { findUserById } from "./repositories/auth-repository.js";
@@ -9,8 +9,8 @@ interface ConnectedUser { id: string; username: string; mmr: number; verified: b
 interface QueueEntry { socketId: string; user: ConnectedUser; joinedAt: number }
 interface Room {
   id: string; mode: "RANKED" | "TRAINING"; state: GameState; events: ArenaEvent[];
-  sockets: Map<string, string>; timer: NodeJS.Timeout; eventCursor: number;
-  difficulty?: BotDifficulty; nextBotActionAt: number; disconnected: Map<string, number>; ending: boolean;
+  sockets: Map<string, string>; eventCursor: number;
+  difficulty?: BotDifficulty; nextBotActionAt: number; disconnected: Map<string, number>; ending: boolean; active: boolean;
 }
 
 const queue = new Map<string, QueueEntry>();
@@ -18,10 +18,17 @@ const rooms = new Map<string, Room>();
 const playerRooms = new Map<string, string>();
 const socketUsers = new Map<string, ConnectedUser>();
 
+let globalTicker: NodeJS.Timeout | null = null;
+
 const safeState = (room: Room) => ({
   roomId: room.id, serverTime: Date.now(), state: room.state,
   connection: "BOA", currentEvent: room.state.currentEvent
 });
+
+const serverFull = (socket: Socket) =>
+  socket.emit("match:error", { code: "SERVER_FULL", message: "A quadra está lotada. Tente novamente em instantes." });
+
+const capacityAvailable = () => rooms.size < env.MAX_CONCURRENT_ROOMS;
 
 export function attachRealtime(io: Server) {
   io.use(async (socket, next) => {
@@ -46,19 +53,38 @@ export function attachRealtime(io: Server) {
       socket.join(room.id); socket.emit("match:state", safeState(room));
     });
     socket.on("match:input", (intent: Omit<InputIntent, "playerId">, ack) => handleInput(io, socket, intent, ack));
+    socket.on("match:collect_orb", (ack?: (value: unknown) => void) => handleCollectOrb(io, socket, ack));
     socket.on("match:reconnect", () => reconnect(io, socket));
     socket.on("match:leave", () => forfeit(io, socket));
     socket.on("disconnect", () => disconnect(io, socket));
   });
 
   const matcher = setInterval(() => findMatches(io), 1000);
-  io.engine.on("close", () => clearInterval(matcher));
+  io.engine.on("close", () => {
+    clearInterval(matcher);
+    if (globalTicker) { clearInterval(globalTicker); globalTicker = null; }
+  });
+}
+
+function ensureTicker(io: Server) {
+  if (globalTicker) return;
+  globalTicker = setInterval(() => {
+    for (const room of rooms.values()) {
+      if (room.active && !room.ending && room.state.phase === "ROUND_ACTIVE") tickRoom(io, room);
+    }
+    if (rooms.size === 0 && globalTicker) {
+      clearInterval(globalTicker);
+      globalTicker = null;
+    }
+  }, 100);
 }
 
 function joinQueue(io: Server, socket: Socket) {
   const user = socketUsers.get(socket.id)!;
   if (!user.verified) return socket.emit("match:error", { code: "EMAIL_NOT_VERIFIED", message: "Verifique seu e-mail para jogar online." });
   if (queueHasUser(user.id) || playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_QUEUED", message: "Você já está em uma fila ou partida." });
+  if (!capacityAvailable()) return serverFull(socket);
+  if (queue.size >= env.MAX_QUEUE_SIZE) return serverFull(socket);
   queue.set(socket.id, { socketId: socket.id, user, joinedAt: Date.now() });
   socket.emit("matchmaking:status", { status: "SEARCHING", joinedAt: Date.now(), range: 100 });
   findMatches(io);
@@ -71,55 +97,152 @@ function leaveQueue(socket: Socket, notify: boolean) {
 const queueHasUser = (id: string) => [...queue.values()].some(e => e.user.id === id);
 
 function findMatches(io: Server) {
-  const entries = [...queue.values()].sort((a, b) => a.joinedAt - b.joinedAt);
-  for (const first of entries) {
-    if (!queue.has(first.socketId)) continue;
-    const waited = (Date.now() - first.joinedAt) / 1000;
-    const range = 100 + Math.floor(waited / 10) * 75;
-    const second = entries.find(e => e.socketId !== first.socketId && queue.has(e.socketId) && e.user.id !== first.user.id && e.user.region === first.user.region && Math.abs(e.user.mmr - first.user.mmr) <= range);
-    if (!second) { io.to(first.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: first.joinedAt, range }); continue; }
-    queue.delete(first.socketId); queue.delete(second.socketId);
-    void createRankedRoom(io, first, second);
+  if (!capacityAvailable()) return;
+  const byRegion = new Map<string, QueueEntry[]>();
+  for (const entry of queue.values()) {
+    const list = byRegion.get(entry.user.region);
+    if (list) list.push(entry);
+    else byRegion.set(entry.user.region, [entry]);
+  }
+  for (const entries of byRegion.values()) {
+    entries.sort((a, b) => a.joinedAt - b.joinedAt);
+    const matched = new Set<string>();
+    for (const first of entries) {
+      if (!capacityAvailable()) return;
+      if (!queue.has(first.socketId) || matched.has(first.socketId)) continue;
+      const waited = (Date.now() - first.joinedAt) / 1000;
+      const range = 100 + Math.floor(waited / 10) * 75;
+      const second = entries.find(e =>
+        e.socketId !== first.socketId
+        && !matched.has(e.socketId)
+        && queue.has(e.socketId)
+        && e.user.id !== first.user.id
+        && Math.abs(e.user.mmr - first.user.mmr) <= range
+      );
+      if (!second) {
+        io.to(first.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: first.joinedAt, range });
+        continue;
+      }
+      matched.add(first.socketId);
+      matched.add(second.socketId);
+      queue.delete(first.socketId);
+      queue.delete(second.socketId);
+      void createRankedRoom(io, first, second);
+    }
   }
 }
 
 async function createRankedRoom(io: Server, first: QueueEntry, second: QueueEntry) {
-  const seed = Math.floor(Math.random() * 2_000_000_000);
-  const matchId = await createMatch("RANKED", seed, [{ userId: first.user.id, mmrBefore: first.user.mmr }, { userId: second.user.id, mmrBefore: second.user.mmr }]);
-  const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
-  room.sockets.set(first.user.id, first.socketId); room.sockets.set(second.user.id, second.socketId);
-  rooms.set(room.id, room);
-  for (const e of [first, second]) { playerRooms.set(e.user.id, room.id); io.sockets.sockets.get(e.socketId)?.join(room.id); }
-  io.to(room.id).emit("match:found", { roomId: room.id, players: [first.user, second.user].map(({ id, username, mmr }) => ({ id, username, mmr })), seed });
-  setTimeout(() => startRoom(io, room), 2500);
+  if (!capacityAvailable()) {
+    requeue(io, first);
+    requeue(io, second);
+    return;
+  }
+  try {
+    const seed = Math.floor(Math.random() * 2_000_000_000);
+    const matchId = await createMatch("RANKED", seed, [
+      { userId: first.user.id, mmrBefore: first.user.mmr },
+      { userId: second.user.id, mmrBefore: second.user.mmr }
+    ]);
+    const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
+    room.sockets.set(first.user.id, first.socketId);
+    room.sockets.set(second.user.id, second.socketId);
+    rooms.set(room.id, room);
+    for (const e of [first, second]) {
+      playerRooms.set(e.user.id, room.id);
+      io.sockets.sockets.get(e.socketId)?.join(room.id);
+    }
+    io.to(room.id).emit("match:found", {
+      roomId: room.id,
+      players: [first.user, second.user].map(({ id, username, mmr }) => ({ id, username, mmr })),
+      seed
+    });
+    setTimeout(() => startRoom(io, room), 2500);
+  } catch (error) {
+    console.error("ranked_room_failed", {
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : "Unknown"
+    });
+    for (const e of [first, second]) {
+      playerRooms.delete(e.user.id);
+      const socket = io.sockets.sockets.get(e.socketId);
+      socket?.emit("match:error", { code: "MATCH_CREATE_FAILED", message: "Não foi possível abrir a partida. Tente de novo." });
+      requeue(io, e);
+    }
+  }
+}
+
+function requeue(io: Server, entry: QueueEntry) {
+  if (!socketUsers.has(entry.socketId) || playerRooms.has(entry.user.id) || queueHasUser(entry.user.id)) return;
+  if (queue.size >= env.MAX_QUEUE_SIZE || !capacityAvailable()) {
+    io.to(entry.socketId).emit("match:error", { code: "SERVER_FULL", message: "A quadra está lotada. Tente novamente em instantes." });
+    return;
+  }
+  queue.set(entry.socketId, { ...entry, joinedAt: Date.now() });
+  io.to(entry.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: Date.now(), range: 100 });
 }
 
 async function startTraining(io: Server, socket: Socket, requested?: BotDifficulty) {
   const user = socketUsers.get(socket.id)!;
   if (playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_PLAYING", message: "Você já está em uma partida." });
+  if (!capacityAvailable()) return serverFull(socket);
   const difficulty: BotDifficulty = ["INICIANTE", "NORMAL", "DIFICIL", "INSANO"].includes(requested || "") ? requested! : "NORMAL";
-  const seed = Math.floor(Math.random() * 2_000_000_000);
-  const matchId = await createMatch("TRAINING", seed, [{ userId: user.id, mmrBefore: user.mmr }]);
-  const room = makeRoom(matchId, "TRAINING", seed, [user, { id: `bot:${matchId}`, username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro", mmr: user.mmr, verified: true, region: user.region }]);
-  room.difficulty = difficulty; room.sockets.set(user.id, socket.id); rooms.set(room.id, room); playerRooms.set(user.id, room.id); socket.join(room.id);
-  socket.emit("match:found", { roomId: room.id, players: Object.values(room.state.players).map(p => ({ id: p.id, username: p.username })), seed, training: true, difficulty });
-  setTimeout(() => startRoom(io, room), 1200);
+  try {
+    const seed = Math.floor(Math.random() * 2_000_000_000);
+    const matchId = await createMatch("TRAINING", seed, [{ userId: user.id, mmrBefore: user.mmr }]);
+    const room = makeRoom(matchId, "TRAINING", seed, [user, {
+      id: `bot:${matchId}`,
+      username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro",
+      mmr: user.mmr,
+      verified: true,
+      region: user.region
+    }]);
+    room.difficulty = difficulty;
+    room.sockets.set(user.id, socket.id);
+    rooms.set(room.id, room);
+    playerRooms.set(user.id, room.id);
+    socket.join(room.id);
+    socket.emit("match:found", {
+      roomId: room.id,
+      players: Object.values(room.state.players).map(p => ({ id: p.id, username: p.username })),
+      seed,
+      training: true,
+      difficulty
+    });
+    setTimeout(() => startRoom(io, room), 1200);
+  } catch (error) {
+    console.error("training_room_failed", {
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : "Unknown"
+    });
+    playerRooms.delete(user.id);
+    socket.emit("match:error", { code: "MATCH_CREATE_FAILED", message: "Não foi possível abrir o treino. Tente de novo." });
+  }
 }
 
 function makeRoom(id: string, mode: Room["mode"], seed: number, users: ConnectedUser[]): Room {
   const now = Date.now();
-  return { id, mode, state: createGame(seed, users, now), events: [], sockets: new Map(), eventCursor: 0, timer: setInterval(() => {}, 60_000), nextBotActionAt: now, disconnected: new Map(), ending: false };
+  return {
+    id, mode, state: createGame(seed, users, now), events: [], sockets: new Map(),
+    eventCursor: 0, nextBotActionAt: now, disconnected: new Map(), ending: false, active: false
+  };
 }
 
 function startRoom(io: Server, room: Room) {
-  clearInterval(room.timer);
+  if (room.ending || !rooms.has(room.id)) return;
   const now = Date.now();
-  room.state.phase = "ROUND_ACTIVE"; room.state.roundEndsAt = now + 45_000;
-  room.events = generateEvents(room.state.seed + room.state.round, now, 10); room.eventCursor = 0;
+  room.state.phase = "ROUND_ACTIVE";
+  room.state.roundEndsAt = now + 45_000;
+  room.events = generateEvents(room.state.seed + room.state.round, now, 10);
+  room.eventCursor = 0;
   room.nextBotActionAt = now + 500;
-  void markMatchActive(room.id);
+  room.active = true;
+  void markMatchActive(room.id).catch(error => console.error("mark_active_failed", {
+    matchId: room.id,
+    message: error instanceof Error ? error.message : "Unknown"
+  }));
   io.to(room.id).emit("match:start", { ...safeState(room), countdownEndedAt: now });
-  room.timer = setInterval(() => tickRoom(io, room), 100);
+  ensureTicker(io);
 }
 
 function tickRoom(io: Server, room: Room) {
@@ -149,7 +272,7 @@ function tickBot(io: Server, room: Room, now: number) {
   const result = applyInput(room.state, { playerId: bot.id, input: "SIX", clientTimestamp: now, sequence: bot.lastSequence + 1 }, now);
   io.to(room.id).emit("match:action", { playerId: bot.id, input: "SIX", result, serverTime: now });
   setTimeout(() => {
-    if (room.state.phase !== "ROUND_ACTIVE") return;
+    if (room.state.phase !== "ROUND_ACTIVE" || room.ending) return;
     const at = Date.now();
     const result = applyInput(room.state, { playerId: bot.id, input: "SEVEN", clientTimestamp: at, sequence: bot.lastSequence + 1 }, at);
     io.to(room.id).emit("match:action", { playerId: bot.id, input: "SEVEN", result, serverTime: at });
@@ -167,13 +290,31 @@ function handleInput(io: Server, socket: Socket, raw: Omit<InputIntent, "playerI
   io.to(room.id).emit("match:state", safeState(room));
 }
 
+function handleCollectOrb(io: Server, socket: Socket, ack?: (value: unknown) => void) {
+  const room = getRoomFor(socket), user = socketUsers.get(socket.id);
+  if (!room || !user || room.state.phase !== "ROUND_ACTIVE") return ack?.({ accepted: false, reason: "ROOM" });
+  const player = room.state.players[user.id];
+  if (!player) return ack?.({ accepted: false, reason: "PLAYER" });
+  const result = collectAuraOrb(player);
+  ack?.(result);
+  if (!result.accepted) return;
+  room.state.version++;
+  io.to(room.id).emit("match:orb_collected", {
+    playerId: user.id,
+    multiplier: result.multiplier,
+    orbClaims: player.orbClaims,
+    state: safeState(room)
+  });
+}
+
 function endRound(io: Server, room: Room) {
   if (room.state.phase !== "ROUND_ACTIVE") return;
   room.state.phase = "ROUND_ENDING";
+  room.active = false;
   const players = Object.values(room.state.players).sort((a, b) => b.aura - a.aura);
   if (players[0]!.aura === players[1]!.aura) {
     const sudden = { ...generateEvents(room.state.seed + 999, Date.now(), 1)[0]!, name: "Morte súbita", kind: "PRESSAO" as const, reward: 67, risk: 67, penalty: 30, startsAt: Date.now() + 1000 };
-    room.events = [sudden]; room.eventCursor = 0; room.state.roundEndsAt = sudden.startsAt + sudden.duration; room.state.phase = "ROUND_ACTIVE";
+    room.events = [sudden]; room.eventCursor = 0; room.state.roundEndsAt = sudden.startsAt + sudden.duration; room.state.phase = "ROUND_ACTIVE"; room.active = true;
     return io.to(room.id).emit("match:event", { event: sudden, suddenDeath: true, serverTime: Date.now() });
   }
   const roundWinner = players[0]!;
@@ -181,30 +322,49 @@ function endRound(io: Server, room: Room) {
   io.to(room.id).emit("match:round_end", { round: room.state.round, winnerId: roundWinner.id, state: safeState(room) });
   if (room.state.roundWins[roundWinner.id] >= 2) return void finishRoom(io, room, roundWinner.id, "SCORE");
   room.state.round++; room.state.phase = "INTERMISSION";
-  for (const player of players) { player.aura = 0; player.ego = 0; player.combo = 0; player.pendingSixAt = null; }
+  for (const player of players) {
+    player.aura = 0;
+    player.ego = 0;
+    player.combo = 0;
+    player.pendingSixAt = null;
+    player.multiplier = 1;
+    player.orbClaims = 0;
+  }
   setTimeout(() => startRoom(io, room), 3500);
 }
 
 async function finishRoom(io: Server, room: Room, winnerId: string, reason: string) {
-  if (room.ending) return; room.ending = true; clearInterval(room.timer);
-  room.state.phase = "FINISHED"; room.state.winnerId = winnerId;
+  if (room.ending) return;
+  room.ending = true;
+  room.active = false;
+  room.state.phase = "FINISHED";
+  room.state.winnerId = winnerId;
   const players = Object.values(room.state.players);
-  if (room.mode === "RANKED") {
-    const [a, b] = players;
-    const profiles = await getMatchProfiles([a!.id, b!.id]);
-    const updates = players.map((p, index) => {
-      const profile = profiles.find(x => x.userId === p.id)!;
-      const opponent = profiles.find(x => x.userId !== p.id)!;
-      const won = p.id === winnerId, delta = mmrDelta(profile.mmr, opponent.mmr, won ? 1 : 0, reason === "ABANDON" && !won);
-      return { p, profile, won, delta, opponent: players[1 - index]! };
+  try {
+    if (room.mode === "RANKED") {
+      const [a, b] = players;
+      const profiles = await getMatchProfiles([a!.id, b!.id]);
+      const updates = players.map((p, index) => {
+        const profile = profiles.find(x => x.userId === p.id)!;
+        const opponent = profiles.find(x => x.userId !== p.id)!;
+        const won = p.id === winnerId, delta = mmrDelta(profile.mmr, opponent.mmr, won ? 1 : 0, reason === "ABANDON" && !won);
+        return { p, profile, won, delta, opponent: players[1 - index]! };
+      });
+      await finishRankedMatch(room.id, winnerId, reason, updates.map(({ p, profile, won, delta }) => ({
+        player: p, profile, won, delta, rank: rankForAura(profile.totalAura + p.aura)
+      })));
+      io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room), mmrChanges: Object.fromEntries(updates.map(u => [u.p.id, u.delta])) });
+    } else {
+      const human = players.find(p => !p.id.startsWith("bot:"))!;
+      await finishTrainingMatch(room.id, winnerId, reason, human);
+      io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
+    }
+  } catch (error) {
+    console.error("finish_room_failed", {
+      matchId: room.id,
+      mode: room.mode,
+      message: error instanceof Error ? error.message : "Unknown"
     });
-    await finishRankedMatch(room.id, winnerId, reason, updates.map(({ p, profile, won, delta }) => ({
-      player: p, profile, won, delta, rank: rankFor(profile.mmr + delta)
-    })));
-    io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room), mmrChanges: Object.fromEntries(updates.map(u => [u.p.id, u.delta])) });
-  } else {
-    const human = players.find(p => !p.id.startsWith("bot:"))!;
-    await finishTrainingMatch(room.id, winnerId, reason, human);
     io.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
   }
   setTimeout(() => cleanupRoom(room), 5000);
@@ -245,17 +405,8 @@ function forfeit(io: Server, socket: Socket) {
 }
 
 function cleanupRoom(room: Room) {
-  clearInterval(room.timer); rooms.delete(room.id);
+  room.active = false;
+  rooms.delete(room.id);
   for (const id of Object.keys(room.state.players)) if (!id.startsWith("bot:")) playerRooms.delete(id);
 }
 
-function rankFor(mmr: number) {
-  if (mmr >= 1900) return "AURA_LENDARIA";
-  if (mmr >= 1750) return "EGO_INABALAVEL";
-  if (mmr >= 1600) return "PRESENCA_DOMINANTE";
-  if (mmr >= 1450) return "SIX_SEVEN_CERTIFICADO";
-  if (mmr >= 1300) return "FARMER_DE_AURA";
-  if (mmr >= 1150) return "AURA_QUESTIONAVEL";
-  if (mmr >= 950) return "EGO_FRAGIL";
-  return "SEM_PRESENCA";
-}

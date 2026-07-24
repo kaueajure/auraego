@@ -13,6 +13,26 @@ export const RANK_LABELS: Record<Rank, string> = {
   AURA_LENDARIA: "Aura Lendária"
 };
 
+/** Patentes por aura total. Escala ×100 do antigo limiar (aura agora sobe de 100 em 100). */
+export const RANK_AURA_THRESHOLDS: ReadonlyArray<{ rank: Rank; minAura: number }> = [
+  { rank: "AURA_LENDARIA", minAura: 190_000 },
+  { rank: "EGO_INABALAVEL", minAura: 175_000 },
+  { rank: "PRESENCA_DOMINANTE", minAura: 160_000 },
+  { rank: "SIX_SEVEN_CERTIFICADO", minAura: 145_000 },
+  { rank: "FARMER_DE_AURA", minAura: 130_000 },
+  { rank: "AURA_QUESTIONAVEL", minAura: 115_000 },
+  { rank: "EGO_FRAGIL", minAura: 95_000 },
+  { rank: "SEM_PRESENCA", minAura: 0 }
+];
+
+export function rankForAura(totalAura: number): Rank {
+  const aura = Math.max(0, Math.floor(Number(totalAura) || 0));
+  for (const entry of RANK_AURA_THRESHOLDS) {
+    if (aura >= entry.minAura) return entry.rank;
+  }
+  return "SEM_PRESENCA";
+}
+
 export interface PublicUser {
   id: string;
   username: string;
@@ -22,6 +42,7 @@ export interface PublicUser {
     level: number; experience: number; totalAura: number; mmr: number;
     rank: Rank; wins: number; losses: number; winStreak: number;
     tutorialCompleted: boolean;
+    selectedCosmetics: Record<string, string>;
   };
 }
 

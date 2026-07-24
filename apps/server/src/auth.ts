@@ -1,3 +1,4 @@
+import { rankForAura } from "@aura-ego/shared";
 import crypto from "node:crypto";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
@@ -26,15 +27,29 @@ const cookie = {
   httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "lax" as const,
   path: "/auth", maxAge: durationMs(env.JWT_REFRESH_EXPIRES_IN)
 };
+function asCosmeticsMap(value: unknown): Record<string, string> {
+  let source = value;
+  if (typeof source === "string") {
+    try { source = JSON.parse(source); } catch { return {}; }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(source as Record<string, unknown>)) {
+    if (typeof entry === "string") out[key] = entry;
+  }
+  return out;
+}
+
 const publicUser = (user: User) => {
   if (!user.profile) throw new Error("PROFILE_NOT_FOUND");
   return {
     id: user.id, username: user.username, email: user.email, emailVerified: Boolean(user.emailVerifiedAt),
     profile: {
       level: user.profile.level, experience: user.profile.experience, totalAura: user.profile.totalAura,
-      mmr: user.profile.mmr, rank: user.profile.currentRank, wins: user.profile.wins,
+      mmr: user.profile.mmr, rank: rankForAura(user.profile.totalAura), wins: user.profile.wins,
       losses: user.profile.losses, winStreak: user.profile.winStreak,
-      tutorialCompleted: user.profile.tutorialCompleted
+      tutorialCompleted: user.profile.tutorialCompleted,
+      selectedCosmetics: asCosmeticsMap(user.profile.selectedCosmetics)
     }
   };
 };

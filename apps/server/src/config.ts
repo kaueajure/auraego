@@ -34,7 +34,10 @@ const schema = z.object({
   SMTP_FROM_EMAIL: z.email(),
   SOCKET_CORS_ORIGIN: z.url(),
   MAX_LATENCY_COMPENSATION_MS: z.coerce.number().default(150),
-  RECONNECT_WINDOW_MS: z.coerce.number().default(15000)
+  RECONNECT_WINDOW_MS: z.coerce.number().default(15000),
+  DATABASE_POOL_SIZE: z.coerce.number().int().positive().max(100).default(25),
+  MAX_CONCURRENT_ROOMS: z.coerce.number().int().positive().default(200),
+  MAX_QUEUE_SIZE: z.coerce.number().int().positive().default(500)
 });
 
 const parsed = schema.safeParse(process.env);

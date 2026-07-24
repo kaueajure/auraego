@@ -5,6 +5,7 @@ import {
   Euler,
   LoopOnce,
   LoopRepeat,
+  Matrix4,
   MathUtils,
   Mesh,
   MeshStandardMaterial,
@@ -16,7 +17,19 @@ import {
 } from "three";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 
-export type CharacterAction = "idle" | "six" | "seven" | "chin" | "win" | "lose";
+export type CharacterAction =
+  | "idle"
+  | "six"
+  | "seven"
+  | "chin"
+  | "win"
+  | "lose"
+  | "cross"
+  | "victory"
+  | "salute"
+  | "focus"
+  | "champion"
+  | "point";
 
 interface CharacterProps {
   color?: string;
@@ -44,6 +57,13 @@ interface ArmRig {
   baseForearm: Quaternion;
   baseHand: Quaternion;
   fingerDirection: Vector3;
+  sourceFinger: Vector3;
+  sourcePalm: Vector3;
+}
+
+interface FingerBoneRig {
+  bone: Bone;
+  base: Quaternion;
 }
 
 interface CharacterRig {
@@ -53,6 +73,16 @@ interface CharacterRig {
   head: Bone;
   baseChest: Quaternion;
   baseHead: Quaternion;
+  pelvis: Bone;
+  spine: Bone;
+  leftLeg: Bone;
+  rightLeg: Bone;
+  basePelvis: Quaternion;
+  baseSpine: Quaternion;
+  baseLeftLeg: Quaternion;
+  baseRightLeg: Quaternion;
+  leftFingers: FingerBoneRig[];
+  rightFingers: FingerBoneRig[];
 }
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
@@ -161,6 +191,15 @@ function createArmRig(model: Group, side: "L" | "R"): ArmRig {
   if (!upper || !forearm || !hand) {
     throw new Error(`Rig incompleto no player.glb: braço ${side}`);
   }
+  const middle = model.getObjectByName(`middle1${side}`) as Bone;
+  const index = model.getObjectByName(`index1${side}`) as Bone;
+  const pinky = model.getObjectByName(`pinky1${side}`) as Bone;
+  if (!middle || !index || !pinky) {
+    throw new Error(`Rig incompleto no player.glb: mão ${side}`);
+  }
+  const sourceFinger = middle.position.clone().normalize();
+  const acrossPalm = pinky.position.clone().sub(index.position).normalize();
+  const sourcePalm = sourceFinger.clone().cross(acrossPalm).normalize();
   return {
     upper,
     forearm,
@@ -168,8 +207,20 @@ function createArmRig(model: Group, side: "L" | "R"): ArmRig {
     baseUpper: upper.quaternion.clone(),
     baseForearm: forearm.quaternion.clone(),
     baseHand: hand.quaternion.clone(),
-    fingerDirection: new Vector3(side === "L" ? .37 : -.37, -.93, 0).normalize()
+    fingerDirection: new Vector3(side === "L" ? .37 : -.37, -.93, 0).normalize(),
+    sourceFinger,
+    sourcePalm
   };
+}
+
+function createFingerRigs(model: Group, side: "L" | "R"): FingerBoneRig[] {
+  return ["thumb", "index", "middle", "ring", "pinky"].flatMap(finger =>
+    [1, 2, 3].map(segment => {
+      const bone = model.getObjectByName(`${finger}${segment}${side}`) as Bone;
+      if (!bone) throw new Error(`Rig incompleto no player.glb: ${finger}${segment}${side}`);
+      return { bone, base: bone.quaternion.clone() };
+    })
+  );
 }
 
 function poseArmWithIk(
@@ -178,7 +229,8 @@ function poseArmWithIk(
   targetLocal: Vector3,
   bendHintLocal: Vector3,
   handDirectionLocal: Vector3,
-  influence: number
+  influence: number,
+  palmUp = false
 ) {
   arm.upper.quaternion.copy(arm.baseUpper);
   arm.forearm.quaternion.copy(arm.baseForearm);
@@ -232,15 +284,32 @@ function poseArmWithIk(
   const desiredUpper = parentWorld.clone().invert().multiply(upperWorld);
   const desiredForearm = upperWorld.clone().invert().multiply(forearmWorld);
 
-  const worldHandDirection = handDirectionLocal
-    .clone()
-    .transformDirection(model.matrixWorld)
-    .normalize();
-  const handWorld = new Quaternion().setFromUnitVectors(
-    arm.fingerDirection,
-    worldHandDirection
-  );
-  const desiredHand = forearmWorld.clone().invert().multiply(handWorld);
+  let desiredHand: Quaternion;
+  if (palmUp) {
+    const desiredFinger = handDirectionLocal.clone().normalize();
+    const desiredPalm = new Vector3(0, 1, 0);
+    const desiredRight = desiredFinger.clone().cross(desiredPalm).normalize();
+    const sourceRight = arm.sourceFinger.clone().cross(arm.sourcePalm).normalize();
+    const sourceBasis = new Quaternion().setFromRotationMatrix(
+      new Matrix4().makeBasis(sourceRight, arm.sourceFinger, arm.sourcePalm)
+    );
+    const desiredBasis = new Quaternion().setFromRotationMatrix(
+      new Matrix4().makeBasis(desiredRight, desiredFinger, desiredPalm)
+    );
+    const desiredInModel = desiredBasis.multiply(sourceBasis.invert());
+    const desiredWorld = model.getWorldQuaternion(new Quaternion()).multiply(desiredInModel);
+    desiredHand = forearmWorld.clone().invert().multiply(desiredWorld);
+  } else {
+    const worldHandDirection = handDirectionLocal
+      .clone()
+      .transformDirection(model.matrixWorld)
+      .normalize();
+    const handWorld = new Quaternion().setFromUnitVectors(
+      arm.fingerDirection,
+      worldHandDirection
+    );
+    desiredHand = forearmWorld.clone().invert().multiply(handWorld);
+  }
 
   arm.upper.quaternion.copy(arm.baseUpper).slerp(desiredUpper, influence);
   arm.forearm.quaternion.copy(arm.baseForearm).slerp(desiredForearm, influence);
@@ -282,14 +351,30 @@ export function Character({
   const rig = useMemo<CharacterRig>(() => {
     const chest = model.getObjectByName("chest") as Bone;
     const head = model.getObjectByName("head") as Bone;
-    if (!chest || !head) throw new Error("Rig incompleto no player.glb: tronco/cabeça");
+    const pelvis = model.getObjectByName("pelvis") as Bone;
+    const spine = model.getObjectByName("spine") as Bone;
+    const leftLeg = model.getObjectByName("thighL") as Bone;
+    const rightLeg = model.getObjectByName("thighR") as Bone;
+    if (!chest || !head || !pelvis || !spine || !leftLeg || !rightLeg) {
+      throw new Error("Rig incompleto no player.glb: tronco/cabeça");
+    }
     return {
       left: createArmRig(model, "L"),
       right: createArmRig(model, "R"),
       chest,
       head,
       baseChest: chest.quaternion.clone(),
-      baseHead: head.quaternion.clone()
+      baseHead: head.quaternion.clone(),
+      pelvis,
+      spine,
+      leftLeg,
+      rightLeg,
+      basePelvis: pelvis.quaternion.clone(),
+      baseSpine: spine.quaternion.clone(),
+      baseLeftLeg: leftLeg.quaternion.clone(),
+      baseRightLeg: rightLeg.quaternion.clone(),
+      leftFingers: createFingerRigs(model, "L"),
+      rightFingers: createFingerRigs(model, "R")
     };
   }, [model]);
 
@@ -309,11 +394,35 @@ export function Character({
 
   const { actions } = useAnimations(animations, model);
   const actionStartedAt = useRef(performance.now());
-  const proceduralAction = action === "six" || action === "seven" || action === "chin";
+  const gestureBalance = useRef(0);
+  const gestureResponsiveness = useRef(8);
+  const lastGestureAt = useRef(0);
+  const proceduralAction = [
+    "six",
+    "seven",
+    "chin",
+    "cross",
+    "victory",
+    "salute",
+    "focus",
+    "champion",
+    "point",
+    "lose"
+  ].includes(action);
   const clipAction = proceduralAction ? "idle" : action;
 
   useEffect(() => {
-    actionStartedAt.current = performance.now();
+    const now = performance.now();
+    actionStartedAt.current = now;
+    if (action === "six" || action === "seven") {
+      const interval = lastGestureAt.current ? (now - lastGestureAt.current) / 1000 : .7;
+      gestureResponsiveness.current = MathUtils.clamp(
+        8 + Math.max(0, .7 - interval) * 24,
+        8,
+        24
+      );
+      lastGestureAt.current = now;
+    }
   }, [action]);
 
   useEffect(() => {
@@ -353,53 +462,268 @@ export function Character({
     };
   }, [actions, clipAction]);
 
-  useFrame((_, delta) => {
+  useFrame(({ clock }, delta) => {
     const elapsed = (performance.now() - actionStartedAt.current) / 1000;
+    const time = clock.elapsedTime;
+    const gestureTarget = action === "six" ? 1 : action === "seven" ? -1 : 0;
+    gestureBalance.current = MathUtils.damp(
+      gestureBalance.current,
+      gestureTarget,
+      gestureTarget === 0 ? 7 : gestureResponsiveness.current,
+      delta
+    );
+    const gestureArc = Math.abs(gestureBalance.current);
+    const gestureDirection = gestureBalance.current < 0 ? -1 : 1;
 
     if (action === "six" || action === "seven") {
-      const pulse = smoothstep(0, .11, elapsed);
-      const activeArm = action === "six" ? rig.left : rig.right;
-      const side = action === "six" ? 1 : -1;
+      // Six Seven meme: balança de mãos com palmas pra cima.
+      const bounce = Math.sin(time * 15) * .04 * Math.max(gestureArc, .2);
+      const leftHeight = .34 * gestureBalance.current + bounce;
+      const rightHeight = -.34 * gestureBalance.current - bounce;
+      const spread = .1 + .08 * gestureArc;
       poseArmWithIk(
         model,
-        activeArm,
-        new Vector3(side * .16, 1.36, .54),
-        new Vector3(side * .54, 1.12, .2),
-        new Vector3(side * .06, -.96, .28).normalize(),
-        pulse
+        rig.left,
+        new Vector3(.26 + spread, 1.2 + leftHeight, .36),
+        new Vector3(.58, 1.18, .12),
+        new Vector3(.1, .08, .98),
+        1,
+        true
       );
-    } else if (action === "chin") {
-      const enter = smoothstep(0, .46, elapsed);
-      const leave = 1 - smoothstep(1.92, 2.28, elapsed);
-      const pose = enter * leave;
-      const sweep = smoothstep(.68, 1.65, elapsed);
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.26 - spread, 1.2 + rightHeight, .36),
+        new Vector3(-.58, 1.18, .12),
+        new Vector3(-.1, .08, .98),
+        1,
+        true
+      );
+    } else if (action === "chin" || chadMode && action === "idle") {
+      const enter = action === "chin" ? smoothstep(0, .46, elapsed) : 1;
+      const leave = action === "chin" ? 1 - smoothstep(1.92, 2.28, elapsed) : 1;
+      const pose = Math.max(enter * leave, chadMode && action === "idle" ? .92 : 0);
+      const sway = Math.sin(time * 2.1) * .012;
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(.42 + sway, 1.02, .08),
+        new Vector3(.55, 1.12, .04),
+        new Vector3(.2, -.9, .15).normalize(),
+        pose * .85
+      );
       poseArmWithIk(
         model,
         rig.right,
         new Vector3(
-          MathUtils.lerp(.13, -.065, sweep),
-          1.525 + Math.sin(sweep * Math.PI) * .014,
-          .205
+          -.05 + sway * .4,
+          1.5 + Math.sin(time * 1.7) * .012,
+          .22
         ),
-        new Vector3(-.58, 1.08, .16),
-        new Vector3(-.98, MathUtils.lerp(-.18, -.06, sweep), .04).normalize(),
+        new Vector3(-.58, 1.12, .14),
+        new Vector3(-.96, -.08, .08).normalize(),
         pose
       );
       const chestPose = rig.baseChest.clone().multiply(
-        new Quaternion().setFromEuler(new Euler(-.055, 0, -.018))
+        new Quaternion().setFromEuler(new Euler(-.08, .03, -.02))
       );
       const headPose = rig.baseHead.clone().multiply(
-        new Quaternion().setFromEuler(new Euler(-.12, -.025, .018))
+        new Quaternion().setFromEuler(new Euler(-.16, -.05, .05))
       );
       rig.chest.quaternion.copy(rig.baseChest).slerp(chestPose, pose);
       rig.head.quaternion.copy(rig.baseHead).slerp(headPose, pose);
-    } else if (action === "idle") {
+    } else if (action === "cross") {
+      const pose = smoothstep(0, .4, elapsed);
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(-.2, 1.29, .35),
+        new Vector3(.55, 1.13, .12),
+        new Vector3(-.95, .05, .3).normalize(),
+        pose
+      );
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(.2, 1.22, .37),
+        new Vector3(-.55, 1.08, .1),
+        new Vector3(.95, .05, .3).normalize(),
+        pose
+      );
+    } else if (action === "victory") {
+      const pose = smoothstep(0, .34, elapsed);
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(.34, 1.88, .12),
+        new Vector3(.62, 1.58, .04),
+        new Vector3(.2, .96, .1).normalize(),
+        pose
+      );
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.34, 1.88, .12),
+        new Vector3(-.62, 1.58, .04),
+        new Vector3(-.2, .96, .1).normalize(),
+        pose
+      );
+    } else if (action === "lose") {
+      const pose = smoothstep(0, .42, elapsed);
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(.28, .92, .1),
+        new Vector3(.48, 1.08, .02),
+        new Vector3(.08, -.98, .08).normalize(),
+        pose
+      );
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.28, .9, .12),
+        new Vector3(-.48, 1.06, .02),
+        new Vector3(-.08, -.98, .08).normalize(),
+        pose
+      );
+      const headPose = new Quaternion().setFromEuler(new Euler(.28, 0, 0));
+      const chestPose = new Quaternion().setFromEuler(new Euler(.14, 0, 0));
+      rig.head.quaternion.copy(rig.baseHead).slerp(headPose, pose);
+      rig.chest.quaternion.copy(rig.baseChest).slerp(chestPose, pose);
+    } else if (action === "salute") {
+      const pose = smoothstep(0, .38, elapsed);
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.12, 1.68, .28),
+        new Vector3(-.58, 1.45, .1),
+        new Vector3(.96, .08, .2).normalize(),
+        pose
+      );
+    } else if (action === "focus") {
+      const pose = smoothstep(0, .42, elapsed);
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(.055, 1.34, .44),
+        new Vector3(.5, 1.14, .14),
+        new Vector3(-.12, .96, .22).normalize(),
+        pose
+      );
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.055, 1.34, .44),
+        new Vector3(-.5, 1.14, .14),
+        new Vector3(.12, .96, .22).normalize(),
+        pose
+      );
+    } else if (action === "champion") {
+      const pose = smoothstep(0, .36, elapsed);
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(.25, 1.93, .16),
+        new Vector3(.62, 1.58, .04),
+        new Vector3(.12, .98, .04).normalize(),
+        pose
+      );
+    } else if (action === "point") {
+      const pose = smoothstep(0, .36, elapsed);
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.2, 1.38, .58),
+        new Vector3(-.55, 1.26, .16),
+        new Vector3(0, 0, 1),
+        pose
+      );
+      poseArmWithIk(
+        model,
+        rig.left,
+        new Vector3(.34, 1.04, .18),
+        new Vector3(.55, 1.14, .04),
+        new Vector3(.15, -.96, .2).normalize(),
+        pose
+      );
+      poseArmWithIk(
+        model,
+        rig.right,
+        new Vector3(-.33, 1.02, .2),
+        new Vector3(-.54, 1.12, .04),
+        new Vector3(-.15, -.96, .2).normalize(),
+        pose
+      );
+    } else if (action === "idle" || action === "win") {
       const returnSpeed = 1 - Math.exp(-delta * 14);
       [rig.left, rig.right].forEach(arm => {
         arm.upper.quaternion.slerp(arm.baseUpper, returnSpeed);
         arm.forearm.quaternion.slerp(arm.baseForearm, returnSpeed);
         arm.hand.quaternion.slerp(arm.baseHand, returnSpeed);
       });
+    }
+
+    const gestureActive = action === "six" || action === "seven";
+    const gestureEnergy = gestureActive ? 1 : 0;
+    const breath = Math.sin(time * 1.65);
+    const fingerFlex = gestureActive
+      ? .035 + gestureArc * .085
+      : Math.sin(time * 1.8) * .012;
+    const animateFingers = (fingers: FingerBoneRig[], chinCurl: boolean) => {
+      fingers.forEach(({ bone, base }, index) => {
+        const depth = (index % 3) / 2;
+        const curl = chinCurl ? .12 + depth * .15 : fingerFlex * (1 + depth * .5);
+        const spread = gestureActive && depth === 0 ? Math.sin(index * 1.3) * .035 : 0;
+        bone.quaternion.copy(base).multiply(
+          new Quaternion().setFromEuler(new Euler(curl, spread, 0))
+        );
+      });
+    };
+    animateFingers(rig.leftFingers, false);
+    animateFingers(rig.rightFingers, action === "chin");
+
+    if (action !== "win" && action !== "lose" && action !== "victory" && action !== "chin" && !(chadMode && action === "idle")) {
+      const weightShift = gestureActive
+        ? gestureArc * gestureDirection
+        : Math.sin(time * .85);
+      if (action !== "six" && action !== "seven") {
+        rig.chest.quaternion.copy(rig.baseChest).multiply(
+          new Quaternion().setFromEuler(new Euler(
+            breath * .012,
+            weightShift * .022 * gestureEnergy,
+            -weightShift * .018 * gestureEnergy
+          ))
+        );
+        rig.head.quaternion.copy(rig.baseHead).multiply(
+          new Quaternion().setFromEuler(new Euler(
+            -breath * .008,
+            -weightShift * .03 * gestureEnergy,
+            weightShift * .014 * gestureEnergy
+          ))
+        );
+      }
+      rig.spine.quaternion.copy(rig.baseSpine).multiply(
+        new Quaternion().setFromEuler(new Euler(
+          breath * .008,
+          -weightShift * .018 * gestureEnergy,
+          weightShift * .025 * gestureEnergy
+        ))
+      );
+      rig.pelvis.quaternion.copy(rig.basePelvis).multiply(
+        new Quaternion().setFromEuler(new Euler(
+          0,
+          weightShift * .014 * gestureEnergy,
+          -weightShift * (.016 + .026 * gestureEnergy)
+        ))
+      );
+      rig.leftLeg.quaternion.copy(rig.baseLeftLeg).multiply(
+        new Quaternion().setFromEuler(new Euler(weightShift * .018 * gestureEnergy, 0, weightShift * .012))
+      );
+      rig.rightLeg.quaternion.copy(rig.baseRightLeg).multiply(
+        new Quaternion().setFromEuler(new Euler(-weightShift * .018 * gestureEnergy, 0, -weightShift * .012))
+      );
+      const hop = gestureActive ? Math.abs(Math.sin(time * 15)) * .018 * gestureArc : 0;
+      model.position.y = hop;
     }
 
     const target = chadMode ? 1 : 0;

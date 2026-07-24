@@ -76,6 +76,7 @@ export async function finishRankedMatch(matchId: string, winnerId: string, reaso
 }
 
 export async function finishTrainingMatch(matchId: string, winnerId: string, reason: string, human: PlayerState) {
+  // Training never touches player_profiles — ranked/online is the only mode that updates stats.
   const won = winnerId === human.id;
   await transaction(async connection => {
     await connection.execute(
@@ -91,10 +92,6 @@ export async function finishTrainingMatch(matchId: string, winnerId: string, rea
         human.totalActions ? human.successfulActions / human.totalActions : 0,
         human.perfectActions, human.mistakes, human.spamViolations,
         won ? "WIN" : "LOSS", matchId, human.id]
-    );
-    await connection.execute(
-      "UPDATE player_profiles SET total_aura = total_aura + ?, experience = experience + 35 WHERE user_id = ?",
-      [human.aura, human.id]
     );
   });
 }

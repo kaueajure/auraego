@@ -15,7 +15,7 @@ export interface ArenaEvent {
 
 export interface PlayerState {
   id: string; username: string; aura: number; ego: number; combo: number;
-  multiplier: number; lastInputAt: number; lastSequence: number;
+  multiplier: number; orbClaims: number; lastInputAt: number; lastSequence: number;
   pendingSixAt: number | null; inputTimes: number[]; identicalIntervals: number;
   mistakes: number; perfectActions: number; spamViolations: number; successfulActions: number;
   totalActions: number; highestCombo: number; egoBrokenUntil: number;
@@ -32,9 +32,10 @@ export interface ActionResult { accepted: boolean; evaluation: Evaluation; auraD
 
 export const GAME_CONFIG = {
   maxEgo: 100, pairMinMs: 30, pairMaxMs: 450, idealPairMs: 140,
-  auraPairsPerPoint: 3, egoPairsPerPoint: 5,
+  auraPairsPerPoint: 3, auraStep: 100, egoPairsPerPoint: 5,
   spamWindowMs: 1500, spamLimit: 60, actionLockMs: 0,
-  roundDurationMs: 45_000, roundsToWin: 2, latencyCapMs: 150
+  roundDurationMs: 45_000, roundsToWin: 2, latencyCapMs: 150,
+  specialOrbCombo: 50, auraOrbMultiplier: 1.1
 } as const;
 
 const EVENT_TEMPLATES: Omit<ArenaEvent, "id" | "startsAt">[] = [
@@ -50,7 +51,7 @@ const EVENT_TEMPLATES: Omit<ArenaEvent, "id" | "startsAt">[] = [
 ];
 
 export const createPlayer = (id: string, username: string): PlayerState => ({
-  id, username, aura: 0, ego: 0, combo: 0, multiplier: 1, lastInputAt: 0,
+  id, username, aura: 0, ego: 0, combo: 0, multiplier: 1, orbClaims: 0, lastInputAt: 0,
   lastSequence: 0, pendingSixAt: null, inputTimes: [], identicalIntervals: 0,
   mistakes: 0, perfectActions: 0, spamViolations: 0, successfulActions: 0,
   totalActions: 0, highestCombo: 0, egoBrokenUntil: 0
@@ -84,7 +85,7 @@ export function createGame(seed: number, players: Array<{ id: string; username: 
 }
 
 function fail(player: PlayerState, evaluation: Evaluation, reason: string): ActionResult {
-  player.pendingSixAt = null; player.combo = 0; player.multiplier = 1; player.mistakes++;
+  player.pendingSixAt = null; player.combo = 0; player.orbClaims = 0; player.multiplier = 1; player.mistakes++;
   return { accepted: true, evaluation, auraDelta: 0, egoDelta: 0, combo: 0, reason };
 }
 
@@ -116,9 +117,11 @@ export function applyInput(state: GameState, intent: InputIntent, serverNow: num
   if (pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", "PAIR_TIMING");
   const perfect = pairGap <= GAME_CONFIG.idealPairMs;
   player.combo++; player.highestCombo = Math.max(player.highestCombo, player.combo);
-  player.multiplier = 1;
   player.successfulActions++;
-  const auraGain = player.successfulActions % GAME_CONFIG.auraPairsPerPoint === 0 ? 1 : 0;
+  const baseAura = player.successfulActions % GAME_CONFIG.auraPairsPerPoint === 0
+    ? GAME_CONFIG.auraStep
+    : 0;
+  const auraGain = baseAura ? Math.round(baseAura * player.multiplier) : 0;
   const egoStep = player.successfulActions % GAME_CONFIG.egoPairsPerPoint === 0 ? 1 : 0;
   const nextEgo = Math.min(GAME_CONFIG.maxEgo, player.ego + egoStep);
   const egoGain = nextEgo - player.ego;
@@ -127,6 +130,17 @@ export function applyInput(state: GameState, intent: InputIntent, serverNow: num
   if (perfect) player.perfectActions++;
   const evaluation: Evaluation = player.combo >= 25 ? "AURA_LENDARIA" : player.combo >= 8 ? "AURA_FARM" : perfect ? "SIX_SEVEN_PERFEITO" : "LIMPO";
   return { accepted: true, evaluation, auraDelta: auraGain, egoDelta: egoGain, combo: player.combo, reason: auraGain || egoGain ? undefined : "FARM_PROGRESS" };
+}
+
+/** Coleta a bola GigaChad: cada coleta multiplica o farm de aura por 1.1x. */
+export function collectAuraOrb(player: PlayerState): { accepted: boolean; multiplier: number; reason?: string } {
+  const available = Math.floor(player.combo / GAME_CONFIG.specialOrbCombo);
+  if (player.orbClaims >= available) {
+    return { accepted: false, multiplier: player.multiplier, reason: "NO_ORB" };
+  }
+  player.orbClaims += 1;
+  player.multiplier = Number((player.multiplier * GAME_CONFIG.auraOrbMultiplier).toFixed(4));
+  return { accepted: true, multiplier: player.multiplier };
 }
 
 export function mmrDelta(playerMmr: number, opponentMmr: number, score: 0 | 0.5 | 1, abandoned = false): number {

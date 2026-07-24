@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import type { ActionResult, GameState, InputKind } from "@aura-ego/shared";
+import { MathUtils } from "three";
+import type { ActionResult, GameState, InputKind, PublicUser } from "@aura-ego/shared";
 import { useAuth } from "../auth-context";
 import { Logo } from "../components/Logo";
-import { ArenaScene } from "../components/Scenes";
+import { ArenaScene, type ArenaVariant } from "../components/Scenes";
 import type { CharacterAction } from "../components/Character";
 import { gameSocket } from "../socket";
 import { useGame } from "../store";
 import { api } from "../api";
+import { getEquippedLook } from "../cosmetics";
 
 const labels: Record<ActionResult["evaluation"], string> = {
   ERROU: "Errou",
@@ -57,6 +59,7 @@ export function GamePage() {
   const game = useGame();
   const navigate = useNavigate();
   const socket = gameSocket();
+  const equippedLook = useMemo(() => getEquippedLook(user?.profile.selectedCosmetics), [user?.profile.selectedCosmetics]);
   const [connection, setConnection] = useState("Boa");
   const [action, setAction] = useState<CharacterAction>("idle");
   const [opponentAction, setOpponentAction] = useState<CharacterAction>("idle");
@@ -64,8 +67,14 @@ export function GamePage() {
   const [specialOrbVisible, setSpecialOrbVisible] = useState(false);
   const [specialOrbPosition, setSpecialOrbPosition] = useState<[number, number, number]>([-.55, 2.25, .7]);
   const [playerChad, setPlayerChad] = useState(false);
+  const [auraMultiplier, setAuraMultiplier] = useState(1);
   const [chinPose, setChinPose] = useState(false);
   const [countdown, setCountdown] = useState(3);
+  const [roundBreak, setRoundBreak] = useState<{
+    round: number;
+    winnerId: string;
+    matchPoint: boolean;
+  } | null>(null);
   const [ended, setEnded] = useState<{ winnerId: string; reason: string; mmrChanges?: Record<string, number> } | null>(null);
   const [tutorial, setTutorial] = useState(!user?.profile.tutorialCompleted);
   const [tutorialStep, setTutorialStep] = useState(0);
@@ -73,8 +82,11 @@ export function GamePage() {
   const feedbackTimers = useRef<Record<string, number>>({});
   const actionTimer = useRef<number | null>(null);
   const opponentActionTimer = useRef<number | null>(null);
+  const lastActionAt = useRef(0);
+  const lastOpponentActionAt = useRef(0);
   const orbHideTimer = useRef<number | null>(null);
-  const orbCooldownUntil = useRef(0);
+  const lastComboSeen = useRef(0);
+  const lastOrbMilestone = useRef(0);
   const chinTimer = useRef<number | null>(null);
   const chadTimer = useRef<number | null>(null);
 
@@ -96,32 +108,74 @@ export function GamePage() {
   }, []);
 
   const maybeSpawnSpecialOrb = useCallback((result: ActionResult) => {
-    const farmedPair = result.accepted && result.reason !== "PAIR_PENDING" && (
-      result.reason === "FARM_PROGRESS" || result.auraDelta > 0 || result.egoDelta > 0
-    );
-    const now = Date.now();
-    if (!farmedPair || now < orbCooldownUntil.current || Math.random() > .018) return;
+    if (result.combo < lastComboSeen.current) lastOrbMilestone.current = 0;
+    lastComboSeen.current = result.combo;
+    const milestone = Math.floor(result.combo / 50) * 50;
+    const earnedOrb = result.accepted
+      && result.reason !== "PAIR_PENDING"
+      && result.combo > 0
+      && result.combo % 50 === 0
+      && milestone > lastOrbMilestone.current;
+    if (!earnedOrb) return;
 
-    orbCooldownUntil.current = now + 14_000;
+    lastOrbMilestone.current = milestone;
     setSpecialOrbPosition([
-      -.55 + (Math.random() - .5) * 1.15,
-      1.95 + Math.random() * .55,
-      .55 + Math.random() * .35
+      -1.05 + (Math.random() - .5) * .7,
+      1.3 + Math.random() * .45,
+      .72
     ]);
     setSpecialOrbVisible(true);
     if (orbHideTimer.current) window.clearTimeout(orbHideTimer.current);
-    orbHideTimer.current = window.setTimeout(() => setSpecialOrbVisible(false), 5_500);
+    orbHideTimer.current = window.setTimeout(() => setSpecialOrbVisible(false), 8_000);
   }, []);
 
   const collectSpecialOrb = useCallback(() => {
     if (orbHideTimer.current) window.clearTimeout(orbHideTimer.current);
-    if (chinTimer.current) window.clearTimeout(chinTimer.current);
-    if (chadTimer.current) window.clearTimeout(chadTimer.current);
     setSpecialOrbVisible(false);
-    setPlayerChad(true);
-    setChinPose(true);
-    chinTimer.current = window.setTimeout(() => setChinPose(false), 2_400);
-    chadTimer.current = window.setTimeout(() => setPlayerChad(false), 10_000);
+    socket.emit("match:collect_orb", (result?: { accepted?: boolean; multiplier?: number }) => {
+      if (!result?.accepted) return;
+      if (typeof result.multiplier === "number") setAuraMultiplier(result.multiplier);
+      if (chinTimer.current) window.clearTimeout(chinTimer.current);
+      if (chadTimer.current) window.clearTimeout(chadTimer.current);
+      setPlayerChad(true);
+      setChinPose(true);
+      chinTimer.current = window.setTimeout(() => setChinPose(false), 2_400);
+      chadTimer.current = window.setTimeout(() => setPlayerChad(false), 10_000);
+    });
+  }, [socket]);
+
+  const animateAction = useCallback((nextAction: CharacterAction, hold = false) => {
+    const now = performance.now();
+    const interval = lastActionAt.current ? now - lastActionAt.current : 700;
+    lastActionAt.current = now;
+    if (actionTimer.current) window.clearTimeout(actionTimer.current);
+    setAction(nextAction);
+    if (hold) {
+      actionTimer.current = null;
+      return;
+    }
+    const settleDelay = MathUtils.clamp(interval * 1.35, 180, 900);
+    actionTimer.current = window.setTimeout(() => {
+      setAction("idle");
+      actionTimer.current = null;
+    }, settleDelay);
+  }, []);
+
+  const animateOpponentAction = useCallback((nextAction: CharacterAction, hold = false) => {
+    const now = performance.now();
+    const interval = lastOpponentActionAt.current ? now - lastOpponentActionAt.current : 700;
+    lastOpponentActionAt.current = now;
+    if (opponentActionTimer.current) window.clearTimeout(opponentActionTimer.current);
+    setOpponentAction(nextAction);
+    if (hold) {
+      opponentActionTimer.current = null;
+      return;
+    }
+    const settleDelay = MathUtils.clamp(interval * 1.35, 180, 900);
+    opponentActionTimer.current = window.setTimeout(() => {
+      setOpponentAction("idle");
+      opponentActionTimer.current = null;
+    }, settleDelay);
   }, []);
 
   useEffect(() => () => {
@@ -140,7 +194,15 @@ export function GamePage() {
     const start = (payload: { state: GameState | { state: GameState } }) => {
       game.setState("state" in payload.state ? payload.state.state : payload.state);
       game.setStatus("PLAYING");
+      setRoundBreak(null);
       setCountdown(0);
+      setAuraMultiplier(1);
+      lastOrbMilestone.current = 0;
+      lastComboSeen.current = 0;
+      if (actionTimer.current) window.clearTimeout(actionTimer.current);
+      if (opponentActionTimer.current) window.clearTimeout(opponentActionTimer.current);
+      setAction("idle");
+      setOpponentAction("idle");
     };
     const state = (payload: { state: GameState | { state: GameState } }) => {
       game.setState("state" in payload.state ? payload.state.state : payload.state);
@@ -150,15 +212,41 @@ export function GamePage() {
       showFeedback(payload.playerId, payload.result);
       if (payload.playerId === user?.id) maybeSpawnSpecialOrb(payload.result);
       if (payload.playerId !== user?.id) {
-        if (opponentActionTimer.current) window.clearTimeout(opponentActionTimer.current);
-        setOpponentAction(payload.input === "SIX" ? "six" : "seven");
-        opponentActionTimer.current = window.setTimeout(() => setOpponentAction("idle"), 450);
+        animateOpponentAction(payload.input === "SIX" ? "six" : "seven");
       }
+    };
+    const roundEnd = (payload: { round: number; winnerId: string; state?: { state: GameState } }) => {
+      if (payload.state?.state) game.setState(payload.state.state);
+      const stateAfter = payload.state?.state;
+      const myId = user?.id;
+      const myWins = myId && stateAfter ? stateAfter.roundWins[myId] || 0 : 0;
+      const oppId = stateAfter ? Object.keys(stateAfter.players).find(id => id !== myId) : undefined;
+      const oppWins = oppId && stateAfter ? stateAfter.roundWins[oppId] || 0 : 0;
+      const matchPoint = Math.max(myWins, oppWins) >= 2;
+      const iWonRound = payload.winnerId === myId;
+      animateAction(iWonRound ? "victory" : "lose", true);
+      animateOpponentAction(iWonRound ? "lose" : "victory", true);
+      if (matchPoint) return;
+      setRoundBreak({ round: payload.round, winnerId: payload.winnerId, matchPoint: false });
+      game.setStatus("ENDED");
+    };
+    const orbCollected = (payload: { playerId: string; multiplier: number; state?: { state: GameState } }) => {
+      if (payload.state?.state) game.setState(payload.state.state);
+      if (payload.playerId === user?.id) setAuraMultiplier(payload.multiplier);
     };
     const end = (payload: { winnerId: string; reason: string; state?: { state: GameState }; mmrChanges?: Record<string, number> }) => {
       setEnded(payload);
+      setRoundBreak(null);
       game.setStatus("ENDED");
       if (payload.state?.state) game.setState(payload.state.state);
+      const iWon = payload.winnerId === user?.id;
+      animateAction(iWon ? "victory" : "lose", true);
+      animateOpponentAction(iWon ? "lose" : "victory", true);
+      if (payload.mmrChanges) {
+        void api<PublicUser>("/users/me")
+          .then(fresh => updateUser(fresh))
+          .catch(() => {});
+      }
     };
     const disconnect = () => setConnection("Reconectando");
     const connect = () => {
@@ -172,6 +260,8 @@ export function GamePage() {
       .on("match:state", state)
       .on("match:event", event)
       .on("match:action", actionEvent)
+      .on("match:round_end", roundEnd)
+      .on("match:orb_collected", orbCollected)
       .on("match:end", end)
       .on("disconnect", disconnect)
       .on("connect", connect);
@@ -194,27 +284,27 @@ export function GamePage() {
         .off("match:state", state)
         .off("match:event", event)
         .off("match:action", actionEvent)
+        .off("match:round_end", roundEnd)
+        .off("match:orb_collected", orbCollected)
         .off("match:end", end)
         .off("disconnect", disconnect)
         .off("connect", connect);
     };
-  }, [game.roomId, game.setEvent, game.setRoom, game.setState, game.setStatus, maybeSpawnSpecialOrb, showFeedback, socket, user?.id]);
+  }, [animateAction, animateOpponentAction, game.roomId, game.setEvent, game.setRoom, game.setState, game.setStatus, maybeSpawnSpecialOrb, showFeedback, socket, updateUser, user?.id]);
 
   useEffect(() => {
-    if (game.status === "PLAYING") return;
+    if (game.status === "PLAYING" || ended || roundBreak) return;
     const timer = window.setInterval(() => setCountdown(value => Math.max(1, value - 1)), 1000);
     return () => window.clearInterval(timer);
-  }, [game.status]);
+  }, [ended, game.status, roundBreak]);
 
   const input = useCallback((kind: InputKind) => {
-    if (game.status !== "PLAYING" || tutorial && tutorialStep < 1) return;
-    if (actionTimer.current) window.clearTimeout(actionTimer.current);
-    setAction(kind === "SIX" ? "six" : "seven");
-    actionTimer.current = window.setTimeout(() => setAction("idle"), 420);
+    if (game.status !== "PLAYING" || roundBreak || ended || tutorial && tutorialStep < 1) return;
+    animateAction(kind === "SIX" ? "six" : "seven");
     socket.emit("match:input", { input: kind, clientTimestamp: Date.now(), sequence: game.nextSequence() });
     if (tutorial && tutorialStep === 1 && kind === "SIX") setTutorialStep(2);
     if (tutorial && tutorialStep === 2 && kind === "SEVEN") setTutorialStep(3);
-  }, [game.nextSequence, game.status, socket, tutorial, tutorialStep]);
+  }, [animateAction, ended, game.nextSequence, game.status, roundBreak, socket, tutorial, tutorialStep]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -247,16 +337,24 @@ export function GamePage() {
   const completeTutorial = () => {
     setTutorial(false);
     if (user && !user.profile.tutorialCompleted) {
-      void api("/users/me", { method: "PATCH", body: JSON.stringify({ tutorialCompleted: true }) })
-        .then(() => updateUser({ ...user, profile: { ...user.profile, tutorialCompleted: true } }));
+      void api<PublicUser>("/users/me", { method: "PATCH", body: JSON.stringify({ tutorialCompleted: true }) })
+        .then(fresh => updateUser(fresh));
     }
   };
 
+  const iWonRound = roundBreak ? roundBreak.winnerId === me?.id : false;
+  const roundWinnerName = roundBreak
+    ? (roundBreak.winnerId === me?.id ? me?.username : opponent?.username) || "Jogador"
+    : "";
+
   return <main className="game-page">
     <div className="arena"><ArenaScene
-      playerAction={chinPose ? "chin" : action}
+      playerLook={equippedLook}
+      playerAction={chinPose && !roundBreak && !ended ? "chin" : action}
       opponentAction={opponentAction}
+      variant={Math.max(0, Math.min(2, (game.state?.round || 1) - 1)) as ArenaVariant}
       playerChad={playerChad}
+      playerScale={1}
       specialOrbVisible={specialOrbVisible}
       specialOrbPosition={specialOrbPosition}
       onSpecialOrbClick={collectSpecialOrb}
@@ -289,19 +387,32 @@ export function GamePage() {
         feedback={opponent ? feedbackByPlayer[opponent.id] : undefined}
       />
     </section>
-    {game.event && <section className="event-banner act">
+    {game.event && !roundBreak && !ended && <section className="event-banner act">
       <small>RITMO ATIVO</small>
       <h2>{game.event.name}</h2>
       <div><i style={{ width: `${eventProgress}%` }} /></div>
       <p>Alterne 6 e 7 o mais rápido que conseguir.</p>
     </section>}
-    {playerChad ? <div className="chad-effect" role="status"><small>EFEITO RARO</small><strong>MODO GIGACHAD</strong><span>{chinPose ? "Mão no queixo · mandíbula definida" : "Presença máxima por 10s"}</span></div> : null}
+    {playerChad && !roundBreak ? <div className="chad-effect" role="status"><small>EFEITO RARO • FARM {auraMultiplier.toFixed(2)}×</small><strong>MODO GIGACHAD</strong><span>{chinPose ? "Mão no queixo · mandíbula definida" : "Aura farm amplificada"}</span></div> : null}
     <div className="controls" aria-label="Controles Six Seven">
-      <button onPointerDown={() => input("SIX")}><small>TECLA</small><strong>6</strong><span>Mão esquerda</span></button>
+      <button onPointerDown={() => input("SIX")} disabled={!!roundBreak || !!ended}><small>TECLA</small><strong>6</strong><span>Mão esquerda</span></button>
       <div><i /> ritmo <i /></div>
-      <button onPointerDown={() => input("SEVEN")}><small>TECLA</small><strong>7</strong><span>Mão direita</span></button>
+      <button onPointerDown={() => input("SEVEN")} disabled={!!roundBreak || !!ended}><small>TECLA</small><strong>7</strong><span>Mão direita</span></button>
     </div>
-    {game.status !== "PLAYING" && !ended && <div className="countdown"><small>POSTURA</small><strong>{countdown}</strong><p>A partida começa no ritmo do servidor</p></div>}
+    {game.status !== "PLAYING" && !ended && !roundBreak && <div className="countdown"><small>POSTURA</small><strong>{countdown}</strong><p>A partida começa no ritmo do servidor</p></div>}
+    {roundBreak && !ended && <div className={`round-break ${iWonRound ? "won" : "lost"}`} role="status">
+      <div className="round-break-card">
+        <small>RODADA {roundBreak.round}</small>
+        <h2>{iWonRound ? "Você levou a rodada" : "Rodada perdida"}</h2>
+        <p><b>{roundWinnerName}</b> fechou com mais aura. Prepare a postura para a próxima.</p>
+        <div className="round-break-score">
+          <span><small>VOCÊ</small><strong>{game.state?.roundWins[me?.id || ""] || 0}</strong></span>
+          <i>placar</i>
+          <span><small>RIVAL</small><strong>{game.state?.roundWins[opponent?.id || ""] || 0}</strong></span>
+        </div>
+        <em>Próxima rodada em instantes…</em>
+      </div>
+    </div>}
     {tutorial && <Tutorial step={tutorialStep} next={() => setTutorialStep(value => value + 1)} close={completeTutorial} />}
     {ended && <div className="result-overlay"><div className="result-card">
       <small>PARTIDA ENCERRADA</small>
@@ -350,7 +461,7 @@ function Tutorial({ step, next, close }: { step: number; next: () => void; close
     ["Agora o 7", "Complete o par imediatamente e volte para o 6."],
     ["Velocidade é aura", "Quanto mais rápido você alternar corretamente, mais pares completa antes do relógio zerar."],
     ["Não quebre a sequência", "Tecla repetida ou demora demais quebra o combo. Continue no 6, 7, 6, 7."],
-    ["Olho na bola rara", "Ela aparece poucas vezes. Toque nela para ativar a mandíbula definida e o gesto da mão no queixo."]
+    ["Olho na bola rara", "Ela aparece a cada 50 de combo. Toque nela para ativar o GigaChad e multiplicar o farm de aura por 1.1×."]
   ][Math.min(step, 5)]!;
   return <div className="tutorial">
     <div className="tutorial-step"><span>{Math.min(step + 1, 6)}/6</span><small>TUTORIAL INTERATIVO</small></div>

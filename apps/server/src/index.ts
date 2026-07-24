@@ -7,7 +7,16 @@ import { attachRealtime } from "./realtime.js";
 import { checkDatabase, pool } from "./db.js";
 
 const http = createServer(app);
-const io = new Server(http, { cors: { origin: env.SOCKET_CORS_ORIGIN, credentials: true }, transports: ["websocket", "polling"], maxHttpBufferSize: 32_000, pingInterval: 10_000, pingTimeout: 7_000 });
+const io = new Server(http, {
+  cors: { origin: env.SOCKET_CORS_ORIGIN, credentials: true },
+  transports: ["websocket", "polling"],
+  maxHttpBufferSize: 32_000,
+  pingInterval: 20_000,
+  pingTimeout: 25_000,
+  perMessageDeflate: false,
+  httpCompression: false,
+  connectTimeout: 20_000
+});
 attachRealtime(io);
 
 async function start() {
@@ -23,6 +32,12 @@ async function start() {
   }
 }
 void start();
+
+process.on("unhandledRejection", reason => {
+  console.error("unhandled_rejection", {
+    message: reason instanceof Error ? reason.message : String(reason)
+  });
+});
 
 const shutdown = async () => { io.close(); http.close(); await pool.end(); process.exit(0); };
 process.on("SIGTERM", shutdown);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyInput, botDecision, createGame, generateEvents, mmrDelta } from "./game.js";
+import { applyInput, botDecision, collectAuraOrb, createGame, generateEvents, mmrDelta } from "./game.js";
+import { rankForAura } from "./contracts.js";
 
 const activeGame = () => {
   const game = createGame(67, [{ id: "p1", username: "Aura" }, { id: "p2", username: "Ego" }], 0);
@@ -25,7 +26,7 @@ describe("authoritative game rules", () => {
   it("rewards sustained rapid alternation instead of punishing it as spam", () => {
     const g = activeGame();
     for (let i = 1; i <= 20; i++) applyInput(g, { playerId: "p1", input: i % 2 ? "SIX" : "SEVEN", sequence: i, clientTimestamp: 1000 + i * 60 }, 1000 + i * 60);
-    expect(g.players.p1!.aura).toBe(3);
+    expect(g.players.p1!.aura).toBe(300);
     expect(g.players.p1!.ego).toBe(2);
     expect(g.players.p1!.spamViolations).toBe(0);
   });
@@ -43,8 +44,9 @@ describe("authoritative game rules", () => {
       applyInput(g, { playerId: "p1", input: "SIX", sequence: pair * 2 + 1, clientTimestamp: start }, start);
       applyInput(g, { playerId: "p1", input: "SEVEN", sequence: pair * 2 + 2, clientTimestamp: start + 80 }, start + 80);
     }
-    expect(g.players.p1!.aura).toBe(5);
+    expect(g.players.p1!.aura).toBe(500);
     expect(g.players.p1!.ego).toBe(3);
+    expect(g.players.p1!.aura % 100).toBe(0);
   });
   it("rejects physically impossible input without punishing legitimate speed", () => {
     const g = activeGame();
@@ -60,4 +62,47 @@ describe("authoritative game rules", () => {
     expect(botDecision(event, "INICIANTE", 9).delay).toBeGreaterThanOrEqual(620);
   });
   it("uses opponent rating in MMR and penalizes abandonment", () => expect(mmrDelta(1000, 1200, 1)).toBeGreaterThan(mmrDelta(1000, 1200, 1, true)));
+  it("maps patent from total aura with ×100 thresholds", () => {
+    expect(rankForAura(0)).toBe("SEM_PRESENCA");
+    expect(rankForAura(94_999)).toBe("SEM_PRESENCA");
+    expect(rankForAura(95_000)).toBe("EGO_FRAGIL");
+    expect(rankForAura(145_000)).toBe("SIX_SEVEN_CERTIFICADO");
+    expect(rankForAura(190_000)).toBe("AURA_LENDARIA");
+  });
+  it("multiplies aura farm when a gigachad orb is collected", () => {
+    const g = activeGame();
+    const player = g.players.p1!;
+    for (let pair = 0; pair < 50; pair++) {
+      const start = 1000 + pair * 160;
+      applyInput(g, { playerId: "p1", input: "SIX", sequence: pair * 2 + 1, clientTimestamp: start }, start);
+      applyInput(g, { playerId: "p1", input: "SEVEN", sequence: pair * 2 + 2, clientTimestamp: start + 80 }, start + 80);
+    }
+    expect(player.combo).toBe(50);
+    expect(collectAuraOrb(player)).toEqual({ accepted: true, multiplier: 1.1 });
+    const start = 1000 + 50 * 160;
+    applyInput(g, { playerId: "p1", input: "SIX", sequence: 101, clientTimestamp: start }, start);
+    const tick = applyInput(g, { playerId: "p1", input: "SEVEN", sequence: 102, clientTimestamp: start + 80 }, start + 80);
+    expect(tick.auraDelta).toBe(110);
+  });
+
+  it("allows another orb after combo breaks and rebuilds to 50", () => {
+    const g = activeGame();
+    const player = g.players.p1!;
+    for (let pair = 0; pair < 50; pair++) {
+      const start = 1000 + pair * 160;
+      applyInput(g, { playerId: "p1", input: "SIX", sequence: pair * 2 + 1, clientTimestamp: start }, start);
+      applyInput(g, { playerId: "p1", input: "SEVEN", sequence: pair * 2 + 2, clientTimestamp: start + 80 }, start + 80);
+    }
+    expect(collectAuraOrb(player).accepted).toBe(true);
+    applyInput(g, { playerId: "p1", input: "SEVEN", sequence: 101, clientTimestamp: 9000 }, 9000);
+    expect(player.combo).toBe(0);
+    expect(player.orbClaims).toBe(0);
+    expect(player.multiplier).toBe(1);
+    for (let pair = 0; pair < 50; pair++) {
+      const start = 10_000 + pair * 160;
+      applyInput(g, { playerId: "p1", input: "SIX", sequence: 200 + pair * 2 + 1, clientTimestamp: start }, start);
+      applyInput(g, { playerId: "p1", input: "SEVEN", sequence: 200 + pair * 2 + 2, clientTimestamp: start + 80 }, start + 80);
+    }
+    expect(collectAuraOrb(player)).toEqual({ accepted: true, multiplier: 1.1 });
+  });
 });

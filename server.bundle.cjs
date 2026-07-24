@@ -67,7 +67,10 @@ var schema = import_zod.z.object({
   SMTP_FROM_EMAIL: import_zod.z.email(),
   SOCKET_CORS_ORIGIN: import_zod.z.url(),
   MAX_LATENCY_COMPENSATION_MS: import_zod.z.coerce.number().default(150),
-  RECONNECT_WINDOW_MS: import_zod.z.coerce.number().default(15e3)
+  RECONNECT_WINDOW_MS: import_zod.z.coerce.number().default(15e3),
+  DATABASE_POOL_SIZE: import_zod.z.coerce.number().int().positive().max(100).default(25),
+  MAX_CONCURRENT_ROOMS: import_zod.z.coerce.number().int().positive().default(200),
+  MAX_QUEUE_SIZE: import_zod.z.coerce.number().int().positive().default(500)
 });
 var parsed = schema.safeParse(process.env);
 if (!parsed.success) {
@@ -80,6 +83,182 @@ function durationMs(value) {
   if (!match) throw new Error(`Dura\xE7\xE3o inv\xE1lida em vari\xE1vel de ambiente: use 15m, 24h ou 7d.`);
   const units = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
   return Number(match[1]) * units[match[2]];
+}
+
+// packages/shared/src/game.ts
+var GAME_CONFIG = {
+  maxEgo: 100,
+  pairMinMs: 30,
+  pairMaxMs: 450,
+  idealPairMs: 140,
+  auraPairsPerPoint: 3,
+  auraStep: 100,
+  egoPairsPerPoint: 5,
+  spamWindowMs: 1500,
+  spamLimit: 60,
+  actionLockMs: 0,
+  roundDurationMs: 45e3,
+  roundsToWin: 2,
+  latencyCapMs: 150,
+  specialOrbCombo: 50,
+  auraOrbMultiplier: 1.1
+};
+var EVENT_TEMPLATES = [
+  { kind: "MOMENTO_67", name: "Momento 67", duration: 3200, hitWindow: [650, 2450], perfectWindow: [1200, 1700], risk: 8, reward: 18, penalty: 10, shouldAct: true, animation: "placar-67", sound: "crowd-rise", botRule: "ACT", activation: "baseline" },
+  { kind: "OLHARES", name: "Olhares da multid\xE3o", duration: 3e3, hitWindow: [700, 2200], perfectWindow: [1150, 1550], risk: 14, reward: 24, penalty: 16, shouldAct: true, animation: "crowd-focus", sound: "crowd-hush", botRule: "ACT", activation: "ego>20" },
+  { kind: "SILENCIO", name: "Sil\xEAncio constrangedor", duration: 2600, hitWindow: [2100, 2500], perfectWindow: [2250, 2430], risk: 18, reward: 20, penalty: 18, shouldAct: false, animation: "freeze", sound: "room-tone", botRule: "WAIT", activation: "baseline" },
+  { kind: "EVENTO_FALSO", name: "Isca de aura", duration: 2400, hitWindow: [2e3, 2300], perfectWindow: [2100, 2250], risk: 20, reward: 14, penalty: 20, shouldAct: false, animation: "fake-score", sound: "shoe-squeak", botRule: "WAIT", activation: "round>1" },
+  { kind: "RITMO", name: "Disputa de ritmo", duration: 3600, hitWindow: [800, 2800], perfectWindow: [1400, 1900], risk: 10, reward: 22, penalty: 12, shouldAct: true, animation: "clap-wave", sound: "claps", botRule: "ACT", activation: "baseline" },
+  { kind: "ROUBO", name: "Roubo de aura", duration: 2800, hitWindow: [900, 2200], perfectWindow: [1450, 1700], risk: 16, reward: 25, penalty: 14, shouldAct: true, animation: "spotlight-swap", sound: "whistle", botRule: "COUNTER", activation: "combo>=2" },
+  { kind: "PRESSAO", name: "Press\xE3o m\xE1xima", duration: 2200, hitWindow: [700, 1650], perfectWindow: [1050, 1280], risk: 18, reward: 30, penalty: 16, shouldAct: true, animation: "camera-push", sound: "heartbeat", botRule: "ACT", activation: "late-round" },
+  { kind: "AURA_COLETIVA", name: "Aura coletiva", duration: 3800, hitWindow: [1800, 3100], perfectWindow: [2350, 2700], risk: 12, reward: 26, penalty: 10, shouldAct: true, animation: "crowd-wave", sound: "stomp", botRule: "ACT", activation: "baseline" },
+  { kind: "QUEBRA_CLIMA", name: "Quebra de clima", duration: 2600, hitWindow: [2200, 2500], perfectWindow: [2320, 2440], risk: 16, reward: 18, penalty: 18, shouldAct: false, animation: "ball-roll", sound: "ball-bounce", botRule: "WAIT", activation: "after-combo" }
+];
+var createPlayer = (id, username) => ({
+  id,
+  username,
+  aura: 0,
+  ego: 0,
+  combo: 0,
+  multiplier: 1,
+  orbClaims: 0,
+  lastInputAt: 0,
+  lastSequence: 0,
+  pendingSixAt: null,
+  inputTimes: [],
+  identicalIntervals: 0,
+  mistakes: 0,
+  perfectActions: 0,
+  spamViolations: 0,
+  successfulActions: 0,
+  totalActions: 0,
+  highestCombo: 0,
+  egoBrokenUntil: 0
+});
+var mulberry32 = (seed) => () => {
+  let t = seed += 1831565813;
+  t = Math.imul(t ^ t >>> 15, t | 1);
+  t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+};
+function generateEvents(seed, roundStart, count = 12) {
+  const random = mulberry32(seed);
+  let cursor = roundStart + 1800;
+  return Array.from({ length: count }, (_, id) => {
+    const template = EVENT_TEMPLATES[Math.floor(random() * EVENT_TEMPLATES.length)];
+    const event = { ...template, id, startsAt: cursor };
+    cursor += template.duration + 650 + Math.floor(random() * 850);
+    return event;
+  });
+}
+function createGame(seed, players, now) {
+  return {
+    seed,
+    phase: "COUNTDOWN",
+    round: 1,
+    bestOf: 3,
+    roundEndsAt: now + 48e3,
+    eventIndex: 0,
+    currentEvent: null,
+    players: Object.fromEntries(players.map((p) => [p.id, createPlayer(p.id, p.username)])),
+    roundWins: Object.fromEntries(players.map((p) => [p.id, 0])),
+    winnerId: null,
+    version: 1
+  };
+}
+function fail(player, evaluation, reason) {
+  player.pendingSixAt = null;
+  player.combo = 0;
+  player.orbClaims = 0;
+  player.multiplier = 1;
+  player.mistakes++;
+  return { accepted: true, evaluation, auraDelta: 0, egoDelta: 0, combo: 0, reason };
+}
+function applyInput(state, intent, serverNow, _estimatedLatency = 0) {
+  const player = state.players[intent.playerId];
+  if (!player || state.phase !== "ROUND_ACTIVE") return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player?.combo ?? 0, reason: "STATE" };
+  if (!Number.isInteger(intent.sequence) || intent.sequence <= player.lastSequence) return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "SEQUENCE" };
+  if (Math.abs(serverNow - intent.clientTimestamp) > 5e3) return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "TIMESTAMP" };
+  player.lastSequence = intent.sequence;
+  player.inputTimes = [...player.inputTimes.filter((t) => serverNow - t <= GAME_CONFIG.spamWindowMs), serverNow];
+  if (player.inputTimes.length > GAME_CONFIG.spamLimit) {
+    player.spamViolations++;
+    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_RATE" };
+  }
+  player.lastInputAt = serverNow;
+  if (intent.input === "SIX") {
+    if (player.pendingSixAt !== null) return fail(player, "ERROU", "ORDER");
+    player.pendingSixAt = serverNow;
+    return { accepted: true, evaluation: "SEM_AURA", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "PAIR_PENDING" };
+  }
+  player.totalActions++;
+  if (player.pendingSixAt === null) return fail(player, "ERROU", "ORDER");
+  const pairGap = serverNow - player.pendingSixAt;
+  player.pendingSixAt = null;
+  if (pairGap < GAME_CONFIG.pairMinMs) {
+    player.spamViolations++;
+    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_SPEED" };
+  }
+  if (pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", "PAIR_TIMING");
+  const perfect = pairGap <= GAME_CONFIG.idealPairMs;
+  player.combo++;
+  player.highestCombo = Math.max(player.highestCombo, player.combo);
+  player.successfulActions++;
+  const baseAura = player.successfulActions % GAME_CONFIG.auraPairsPerPoint === 0 ? GAME_CONFIG.auraStep : 0;
+  const auraGain = baseAura ? Math.round(baseAura * player.multiplier) : 0;
+  const egoStep = player.successfulActions % GAME_CONFIG.egoPairsPerPoint === 0 ? 1 : 0;
+  const nextEgo = Math.min(GAME_CONFIG.maxEgo, player.ego + egoStep);
+  const egoGain = nextEgo - player.ego;
+  player.aura += auraGain;
+  player.ego = nextEgo;
+  if (perfect) player.perfectActions++;
+  const evaluation = player.combo >= 25 ? "AURA_LENDARIA" : player.combo >= 8 ? "AURA_FARM" : perfect ? "SIX_SEVEN_PERFEITO" : "LIMPO";
+  return { accepted: true, evaluation, auraDelta: auraGain, egoDelta: egoGain, combo: player.combo, reason: auraGain || egoGain ? void 0 : "FARM_PROGRESS" };
+}
+function collectAuraOrb(player) {
+  const available = Math.floor(player.combo / GAME_CONFIG.specialOrbCombo);
+  if (player.orbClaims >= available) {
+    return { accepted: false, multiplier: player.multiplier, reason: "NO_ORB" };
+  }
+  player.orbClaims += 1;
+  player.multiplier = Number((player.multiplier * GAME_CONFIG.auraOrbMultiplier).toFixed(4));
+  return { accepted: true, multiplier: player.multiplier };
+}
+function mmrDelta(playerMmr, opponentMmr, score, abandoned = false) {
+  const expected = 1 / (1 + Math.pow(10, (opponentMmr - playerMmr) / 400));
+  return Math.round(32 * (score - expected) - (abandoned ? 8 : 0));
+}
+var BOT_PROFILES = {
+  INICIANTE: { cycle: [620, 820], pairGap: [260, 380], accuracy: 0.68 },
+  NORMAL: { cycle: [430, 620], pairGap: [170, 280], accuracy: 0.8 },
+  DIFICIL: { cycle: [290, 430], pairGap: [90, 190], accuracy: 0.9 },
+  INSANO: { cycle: [190, 300], pairGap: [55, 135], accuracy: 0.96 }
+};
+function botDecision(event, difficulty, seed) {
+  const profile = BOT_PROFILES[difficulty], random = mulberry32(seed + event.id * 67);
+  const act = random() < profile.accuracy;
+  const delay = profile.cycle[0] + random() * (profile.cycle[1] - profile.cycle[0]);
+  const pairGap = profile.pairGap[0] + random() * (profile.pairGap[1] - profile.pairGap[0]);
+  return { act, delay: Math.round(delay), pairGap: Math.round(pairGap) };
+}
+
+// packages/shared/src/contracts.ts
+var RANK_AURA_THRESHOLDS = [
+  { rank: "AURA_LENDARIA", minAura: 19e4 },
+  { rank: "EGO_INABALAVEL", minAura: 175e3 },
+  { rank: "PRESENCA_DOMINANTE", minAura: 16e4 },
+  { rank: "SIX_SEVEN_CERTIFICADO", minAura: 145e3 },
+  { rank: "FARMER_DE_AURA", minAura: 13e4 },
+  { rank: "AURA_QUESTIONAVEL", minAura: 115e3 },
+  { rank: "EGO_FRAGIL", minAura: 95e3 },
+  { rank: "SEM_PRESENCA", minAura: 0 }
+];
+function rankForAura(totalAura) {
+  const aura = Math.max(0, Math.floor(Number(totalAura) || 0));
+  for (const entry of RANK_AURA_THRESHOLDS) {
+    if (aura >= entry.minAura) return entry.rank;
+  }
+  return "SEM_PRESENCA";
 }
 
 // apps/server/src/auth.ts
@@ -136,10 +315,12 @@ var pool = import_promise.default.createPool({
   password: env.DATABASE_PASSWORD,
   database: env.DATABASE_NAME,
   waitForConnections: true,
-  connectionLimit: 10,
-  maxIdle: 10,
+  connectionLimit: env.DATABASE_POOL_SIZE,
+  maxIdle: Math.min(env.DATABASE_POOL_SIZE, 10),
   idleTimeout: 6e4,
-  queueLimit: 0,
+  queueLimit: 200,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 1e4,
   charset: "utf8mb4",
   timezone: "Z",
   ssl: env.DATABASE_SSL ? {} : void 0
@@ -366,6 +547,22 @@ var cookie = {
   path: "/auth",
   maxAge: durationMs(env.JWT_REFRESH_EXPIRES_IN)
 };
+function asCosmeticsMap(value) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      return {};
+    }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const out = {};
+  for (const [key, entry] of Object.entries(source)) {
+    if (typeof entry === "string") out[key] = entry;
+  }
+  return out;
+}
 var publicUser = (user) => {
   if (!user.profile) throw new Error("PROFILE_NOT_FOUND");
   return {
@@ -378,11 +575,12 @@ var publicUser = (user) => {
       experience: user.profile.experience,
       totalAura: user.profile.totalAura,
       mmr: user.profile.mmr,
-      rank: user.profile.currentRank,
+      rank: rankForAura(user.profile.totalAura),
       wins: user.profile.wins,
       losses: user.profile.losses,
       winStreak: user.profile.winStreak,
-      tutorialCompleted: user.profile.tutorialCompleted
+      tutorialCompleted: user.profile.tutorialCompleted,
+      selectedCosmetics: asCosmeticsMap(user.profile.selectedCosmetics)
     }
   };
 };
@@ -570,35 +768,84 @@ async function listUserMatches(userId) {
 async function listRankings() {
   const [rows] = await pool.query(
     `SELECT u.username, p.mmr, p.current_rank AS currentRank, p.wins, p.losses,
-      p.total_aura AS totalAura
+      p.total_aura AS totalAura, p.win_streak AS winStreak, p.level
      FROM player_profiles p
      JOIN users u ON u.id = p.user_id
-     ORDER BY p.mmr DESC, p.wins DESC
-     LIMIT 100`
+     WHERE u.status = 'ACTIVE'
+     ORDER BY p.total_aura DESC, p.wins DESC, p.mmr DESC, u.username ASC`
   );
   return rows.map((row, index) => ({
     position: index + 1,
     username: row.username,
     mmr: row.mmr,
-    rank: row.currentRank,
+    rank: rankForAura(Number(row.totalAura)),
     wins: row.wins,
     losses: row.losses,
-    totalAura: Number(row.totalAura)
+    totalAura: Number(row.totalAura),
+    winStreak: row.winStreak,
+    level: row.level
   }));
 }
 
 // apps/server/src/users.ts
+function asCosmeticsMap2(value) {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      return {};
+    }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const out = {};
+  for (const [key, entry] of Object.entries(source)) {
+    if (typeof entry === "string") out[key] = entry;
+  }
+  return out;
+}
+function publicProfile(user) {
+  const { profile } = user;
+  if (!profile) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    emailVerified: Boolean(user.emailVerifiedAt),
+    profile: {
+      level: profile.level,
+      experience: profile.experience,
+      totalAura: profile.totalAura,
+      mmr: profile.mmr,
+      rank: rankForAura(profile.totalAura),
+      wins: profile.wins,
+      losses: profile.losses,
+      winStreak: profile.winStreak,
+      tutorialCompleted: profile.tutorialCompleted,
+      selectedCosmetics: asCosmeticsMap2(profile.selectedCosmetics)
+    }
+  };
+}
 var usersRouter = (0, import_express2.Router)();
 usersRouter.use(requireAuth);
 usersRouter.get("/me", async (req, res) => {
   const user = await getUserProfile(req.auth.sub);
-  if (!user?.profile) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Perfil n\xE3o encontrado." } });
-  res.json({ id: user.id, username: user.username, email: user.email, emailVerified: Boolean(user.emailVerifiedAt), profile: user.profile });
+  const body = user ? publicProfile(user) : null;
+  if (!body) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Perfil n\xE3o encontrado." } });
+  res.json(body);
 });
 usersRouter.patch("/me", async (req, res) => {
-  const data = import_zod3.z.object({ tutorialCompleted: import_zod3.z.boolean().optional(), selectedCosmetics: import_zod3.z.record(import_zod3.z.string(), import_zod3.z.string()).optional(), audioSettings: import_zod3.z.record(import_zod3.z.string(), import_zod3.z.union([import_zod3.z.string(), import_zod3.z.number(), import_zod3.z.boolean()])).optional(), graphicsSettings: import_zod3.z.record(import_zod3.z.string(), import_zod3.z.union([import_zod3.z.string(), import_zod3.z.number(), import_zod3.z.boolean()])).optional() }).strict().parse(req.body);
-  const profile = await updateProfile(req.auth.sub, data);
-  res.json(profile);
+  const data = import_zod3.z.object({
+    tutorialCompleted: import_zod3.z.boolean().optional(),
+    selectedCosmetics: import_zod3.z.record(import_zod3.z.string(), import_zod3.z.string()).optional(),
+    audioSettings: import_zod3.z.record(import_zod3.z.string(), import_zod3.z.union([import_zod3.z.string(), import_zod3.z.number(), import_zod3.z.boolean()])).optional(),
+    graphicsSettings: import_zod3.z.record(import_zod3.z.string(), import_zod3.z.union([import_zod3.z.string(), import_zod3.z.number(), import_zod3.z.boolean()])).optional()
+  }).strict().parse(req.body);
+  await updateProfile(req.auth.sub, data);
+  const user = await getUserProfile(req.auth.sub);
+  const body = user ? publicProfile(user) : null;
+  if (!body) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Perfil n\xE3o encontrado." } });
+  res.json(body);
 });
 usersRouter.get("/me/matches", async (req, res) => {
   res.json(await listUserMatches(req.auth.sub));
@@ -646,149 +893,6 @@ var errors = (error, _req, res, _next) => {
   res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "A partida saiu do ritmo. Tente novamente." } });
 };
 app.use(errors);
-
-// packages/shared/src/game.ts
-var GAME_CONFIG = {
-  maxEgo: 100,
-  pairMinMs: 30,
-  pairMaxMs: 450,
-  idealPairMs: 140,
-  auraPairsPerPoint: 3,
-  egoPairsPerPoint: 5,
-  spamWindowMs: 1500,
-  spamLimit: 60,
-  actionLockMs: 0,
-  roundDurationMs: 45e3,
-  roundsToWin: 2,
-  latencyCapMs: 150
-};
-var EVENT_TEMPLATES = [
-  { kind: "MOMENTO_67", name: "Momento 67", duration: 3200, hitWindow: [650, 2450], perfectWindow: [1200, 1700], risk: 8, reward: 18, penalty: 10, shouldAct: true, animation: "placar-67", sound: "crowd-rise", botRule: "ACT", activation: "baseline" },
-  { kind: "OLHARES", name: "Olhares da multid\xE3o", duration: 3e3, hitWindow: [700, 2200], perfectWindow: [1150, 1550], risk: 14, reward: 24, penalty: 16, shouldAct: true, animation: "crowd-focus", sound: "crowd-hush", botRule: "ACT", activation: "ego>20" },
-  { kind: "SILENCIO", name: "Sil\xEAncio constrangedor", duration: 2600, hitWindow: [2100, 2500], perfectWindow: [2250, 2430], risk: 18, reward: 20, penalty: 18, shouldAct: false, animation: "freeze", sound: "room-tone", botRule: "WAIT", activation: "baseline" },
-  { kind: "EVENTO_FALSO", name: "Isca de aura", duration: 2400, hitWindow: [2e3, 2300], perfectWindow: [2100, 2250], risk: 20, reward: 14, penalty: 20, shouldAct: false, animation: "fake-score", sound: "shoe-squeak", botRule: "WAIT", activation: "round>1" },
-  { kind: "RITMO", name: "Disputa de ritmo", duration: 3600, hitWindow: [800, 2800], perfectWindow: [1400, 1900], risk: 10, reward: 22, penalty: 12, shouldAct: true, animation: "clap-wave", sound: "claps", botRule: "ACT", activation: "baseline" },
-  { kind: "ROUBO", name: "Roubo de aura", duration: 2800, hitWindow: [900, 2200], perfectWindow: [1450, 1700], risk: 16, reward: 25, penalty: 14, shouldAct: true, animation: "spotlight-swap", sound: "whistle", botRule: "COUNTER", activation: "combo>=2" },
-  { kind: "PRESSAO", name: "Press\xE3o m\xE1xima", duration: 2200, hitWindow: [700, 1650], perfectWindow: [1050, 1280], risk: 18, reward: 30, penalty: 16, shouldAct: true, animation: "camera-push", sound: "heartbeat", botRule: "ACT", activation: "late-round" },
-  { kind: "AURA_COLETIVA", name: "Aura coletiva", duration: 3800, hitWindow: [1800, 3100], perfectWindow: [2350, 2700], risk: 12, reward: 26, penalty: 10, shouldAct: true, animation: "crowd-wave", sound: "stomp", botRule: "ACT", activation: "baseline" },
-  { kind: "QUEBRA_CLIMA", name: "Quebra de clima", duration: 2600, hitWindow: [2200, 2500], perfectWindow: [2320, 2440], risk: 16, reward: 18, penalty: 18, shouldAct: false, animation: "ball-roll", sound: "ball-bounce", botRule: "WAIT", activation: "after-combo" }
-];
-var createPlayer = (id, username) => ({
-  id,
-  username,
-  aura: 0,
-  ego: 0,
-  combo: 0,
-  multiplier: 1,
-  lastInputAt: 0,
-  lastSequence: 0,
-  pendingSixAt: null,
-  inputTimes: [],
-  identicalIntervals: 0,
-  mistakes: 0,
-  perfectActions: 0,
-  spamViolations: 0,
-  successfulActions: 0,
-  totalActions: 0,
-  highestCombo: 0,
-  egoBrokenUntil: 0
-});
-var mulberry32 = (seed) => () => {
-  let t = seed += 1831565813;
-  t = Math.imul(t ^ t >>> 15, t | 1);
-  t ^= t + Math.imul(t ^ t >>> 7, t | 61);
-  return ((t ^ t >>> 14) >>> 0) / 4294967296;
-};
-function generateEvents(seed, roundStart, count = 12) {
-  const random = mulberry32(seed);
-  let cursor = roundStart + 1800;
-  return Array.from({ length: count }, (_, id) => {
-    const template = EVENT_TEMPLATES[Math.floor(random() * EVENT_TEMPLATES.length)];
-    const event = { ...template, id, startsAt: cursor };
-    cursor += template.duration + 650 + Math.floor(random() * 850);
-    return event;
-  });
-}
-function createGame(seed, players, now) {
-  return {
-    seed,
-    phase: "COUNTDOWN",
-    round: 1,
-    bestOf: 3,
-    roundEndsAt: now + 48e3,
-    eventIndex: 0,
-    currentEvent: null,
-    players: Object.fromEntries(players.map((p) => [p.id, createPlayer(p.id, p.username)])),
-    roundWins: Object.fromEntries(players.map((p) => [p.id, 0])),
-    winnerId: null,
-    version: 1
-  };
-}
-function fail(player, evaluation, reason) {
-  player.pendingSixAt = null;
-  player.combo = 0;
-  player.multiplier = 1;
-  player.mistakes++;
-  return { accepted: true, evaluation, auraDelta: 0, egoDelta: 0, combo: 0, reason };
-}
-function applyInput(state, intent, serverNow, _estimatedLatency = 0) {
-  const player = state.players[intent.playerId];
-  if (!player || state.phase !== "ROUND_ACTIVE") return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player?.combo ?? 0, reason: "STATE" };
-  if (!Number.isInteger(intent.sequence) || intent.sequence <= player.lastSequence) return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "SEQUENCE" };
-  if (Math.abs(serverNow - intent.clientTimestamp) > 5e3) return { accepted: false, evaluation: "ERROU", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "TIMESTAMP" };
-  player.lastSequence = intent.sequence;
-  player.inputTimes = [...player.inputTimes.filter((t) => serverNow - t <= GAME_CONFIG.spamWindowMs), serverNow];
-  if (player.inputTimes.length > GAME_CONFIG.spamLimit) {
-    player.spamViolations++;
-    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_RATE" };
-  }
-  player.lastInputAt = serverNow;
-  if (intent.input === "SIX") {
-    if (player.pendingSixAt !== null) return fail(player, "ERROU", "ORDER");
-    player.pendingSixAt = serverNow;
-    return { accepted: true, evaluation: "SEM_AURA", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "PAIR_PENDING" };
-  }
-  player.totalActions++;
-  if (player.pendingSixAt === null) return fail(player, "ERROU", "ORDER");
-  const pairGap = serverNow - player.pendingSixAt;
-  player.pendingSixAt = null;
-  if (pairGap < GAME_CONFIG.pairMinMs) {
-    player.spamViolations++;
-    return { accepted: false, evaluation: "FORCADO", auraDelta: 0, egoDelta: 0, combo: player.combo, reason: "IMPOSSIBLE_SPEED" };
-  }
-  if (pairGap > GAME_CONFIG.pairMaxMs) return fail(player, "FORA_DO_RITMO", "PAIR_TIMING");
-  const perfect = pairGap <= GAME_CONFIG.idealPairMs;
-  player.combo++;
-  player.highestCombo = Math.max(player.highestCombo, player.combo);
-  player.multiplier = 1;
-  player.successfulActions++;
-  const auraGain = player.successfulActions % GAME_CONFIG.auraPairsPerPoint === 0 ? 1 : 0;
-  const egoStep = player.successfulActions % GAME_CONFIG.egoPairsPerPoint === 0 ? 1 : 0;
-  const nextEgo = Math.min(GAME_CONFIG.maxEgo, player.ego + egoStep);
-  const egoGain = nextEgo - player.ego;
-  player.aura += auraGain;
-  player.ego = nextEgo;
-  if (perfect) player.perfectActions++;
-  const evaluation = player.combo >= 25 ? "AURA_LENDARIA" : player.combo >= 8 ? "AURA_FARM" : perfect ? "SIX_SEVEN_PERFEITO" : "LIMPO";
-  return { accepted: true, evaluation, auraDelta: auraGain, egoDelta: egoGain, combo: player.combo, reason: auraGain || egoGain ? void 0 : "FARM_PROGRESS" };
-}
-function mmrDelta(playerMmr, opponentMmr, score, abandoned = false) {
-  const expected = 1 / (1 + Math.pow(10, (opponentMmr - playerMmr) / 400));
-  return Math.round(32 * (score - expected) - (abandoned ? 8 : 0));
-}
-var BOT_PROFILES = {
-  INICIANTE: { cycle: [620, 820], pairGap: [260, 380], accuracy: 0.68 },
-  NORMAL: { cycle: [430, 620], pairGap: [170, 280], accuracy: 0.8 },
-  DIFICIL: { cycle: [290, 430], pairGap: [90, 190], accuracy: 0.9 },
-  INSANO: { cycle: [190, 300], pairGap: [55, 135], accuracy: 0.96 }
-};
-function botDecision(event, difficulty, seed) {
-  const profile = BOT_PROFILES[difficulty], random = mulberry32(seed + event.id * 67);
-  const act = random() < profile.accuracy;
-  const delay = profile.cycle[0] + random() * (profile.cycle[1] - profile.cycle[0]);
-  const pairGap = profile.pairGap[0] + random() * (profile.pairGap[1] - profile.pairGap[0]);
-  return { act, delay: Math.round(delay), pairGap: Math.round(pairGap) };
-}
 
 // apps/server/src/repositories/match-repository.ts
 var import_node_crypto4 = __toESM(require("node:crypto"), 1);
@@ -894,10 +998,6 @@ async function finishTrainingMatch(matchId, winnerId, reason, human) {
         human.id
       ]
     );
-    await connection.execute(
-      "UPDATE player_profiles SET total_aura = total_aura + ?, experience = experience + 35 WHERE user_id = ?",
-      [human.aura, human.id]
-    );
   });
 }
 
@@ -906,6 +1006,7 @@ var queue = /* @__PURE__ */ new Map();
 var rooms = /* @__PURE__ */ new Map();
 var playerRooms = /* @__PURE__ */ new Map();
 var socketUsers = /* @__PURE__ */ new Map();
+var globalTicker = null;
 var safeState = (room) => ({
   roomId: room.id,
   serverTime: Date.now(),
@@ -913,6 +1014,8 @@ var safeState = (room) => ({
   connection: "BOA",
   currentEvent: room.state.currentEvent
 });
+var serverFull = (socket) => socket.emit("match:error", { code: "SERVER_FULL", message: "A quadra est\xE1 lotada. Tente novamente em instantes." });
+var capacityAvailable = () => rooms.size < env.MAX_CONCURRENT_ROOMS;
 function attachRealtime(io2) {
   io2.use(async (socket, next) => {
     try {
@@ -943,17 +1046,38 @@ function attachRealtime(io2) {
       socket.emit("match:state", safeState(room));
     });
     socket.on("match:input", (intent, ack) => handleInput(io2, socket, intent, ack));
+    socket.on("match:collect_orb", (ack) => handleCollectOrb(io2, socket, ack));
     socket.on("match:reconnect", () => reconnect(io2, socket));
     socket.on("match:leave", () => forfeit(io2, socket));
     socket.on("disconnect", () => disconnect(io2, socket));
   });
   const matcher = setInterval(() => findMatches(io2), 1e3);
-  io2.engine.on("close", () => clearInterval(matcher));
+  io2.engine.on("close", () => {
+    clearInterval(matcher);
+    if (globalTicker) {
+      clearInterval(globalTicker);
+      globalTicker = null;
+    }
+  });
+}
+function ensureTicker(io2) {
+  if (globalTicker) return;
+  globalTicker = setInterval(() => {
+    for (const room of rooms.values()) {
+      if (room.active && !room.ending && room.state.phase === "ROUND_ACTIVE") tickRoom(io2, room);
+    }
+    if (rooms.size === 0 && globalTicker) {
+      clearInterval(globalTicker);
+      globalTicker = null;
+    }
+  }, 100);
 }
 function joinQueue(io2, socket) {
   const user = socketUsers.get(socket.id);
   if (!user.verified) return socket.emit("match:error", { code: "EMAIL_NOT_VERIFIED", message: "Verifique seu e-mail para jogar online." });
   if (queueHasUser(user.id) || playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_QUEUED", message: "Voc\xEA j\xE1 est\xE1 em uma fila ou partida." });
+  if (!capacityAvailable()) return serverFull(socket);
+  if (queue.size >= env.MAX_QUEUE_SIZE) return serverFull(socket);
   queue.set(socket.id, { socketId: socket.id, user, joinedAt: Date.now() });
   socket.emit("matchmaking:status", { status: "SEARCHING", joinedAt: Date.now(), range: 100 });
   findMatches(io2);
@@ -964,66 +1088,151 @@ function leaveQueue(socket, notify) {
 }
 var queueHasUser = (id) => [...queue.values()].some((e) => e.user.id === id);
 function findMatches(io2) {
-  const entries = [...queue.values()].sort((a, b) => a.joinedAt - b.joinedAt);
-  for (const first of entries) {
-    if (!queue.has(first.socketId)) continue;
-    const waited = (Date.now() - first.joinedAt) / 1e3;
-    const range = 100 + Math.floor(waited / 10) * 75;
-    const second = entries.find((e) => e.socketId !== first.socketId && queue.has(e.socketId) && e.user.id !== first.user.id && e.user.region === first.user.region && Math.abs(e.user.mmr - first.user.mmr) <= range);
-    if (!second) {
-      io2.to(first.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: first.joinedAt, range });
-      continue;
+  if (!capacityAvailable()) return;
+  const byRegion = /* @__PURE__ */ new Map();
+  for (const entry of queue.values()) {
+    const list = byRegion.get(entry.user.region);
+    if (list) list.push(entry);
+    else byRegion.set(entry.user.region, [entry]);
+  }
+  for (const entries of byRegion.values()) {
+    entries.sort((a, b) => a.joinedAt - b.joinedAt);
+    const matched = /* @__PURE__ */ new Set();
+    for (const first of entries) {
+      if (!capacityAvailable()) return;
+      if (!queue.has(first.socketId) || matched.has(first.socketId)) continue;
+      const waited = (Date.now() - first.joinedAt) / 1e3;
+      const range = 100 + Math.floor(waited / 10) * 75;
+      const second = entries.find(
+        (e) => e.socketId !== first.socketId && !matched.has(e.socketId) && queue.has(e.socketId) && e.user.id !== first.user.id && Math.abs(e.user.mmr - first.user.mmr) <= range
+      );
+      if (!second) {
+        io2.to(first.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: first.joinedAt, range });
+        continue;
+      }
+      matched.add(first.socketId);
+      matched.add(second.socketId);
+      queue.delete(first.socketId);
+      queue.delete(second.socketId);
+      void createRankedRoom(io2, first, second);
     }
-    queue.delete(first.socketId);
-    queue.delete(second.socketId);
-    void createRankedRoom(io2, first, second);
   }
 }
 async function createRankedRoom(io2, first, second) {
-  const seed = Math.floor(Math.random() * 2e9);
-  const matchId = await createMatch("RANKED", seed, [{ userId: first.user.id, mmrBefore: first.user.mmr }, { userId: second.user.id, mmrBefore: second.user.mmr }]);
-  const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
-  room.sockets.set(first.user.id, first.socketId);
-  room.sockets.set(second.user.id, second.socketId);
-  rooms.set(room.id, room);
-  for (const e of [first, second]) {
-    playerRooms.set(e.user.id, room.id);
-    io2.sockets.sockets.get(e.socketId)?.join(room.id);
+  if (!capacityAvailable()) {
+    requeue(io2, first);
+    requeue(io2, second);
+    return;
   }
-  io2.to(room.id).emit("match:found", { roomId: room.id, players: [first.user, second.user].map(({ id, username, mmr }) => ({ id, username, mmr })), seed });
-  setTimeout(() => startRoom(io2, room), 2500);
+  try {
+    const seed = Math.floor(Math.random() * 2e9);
+    const matchId = await createMatch("RANKED", seed, [
+      { userId: first.user.id, mmrBefore: first.user.mmr },
+      { userId: second.user.id, mmrBefore: second.user.mmr }
+    ]);
+    const room = makeRoom(matchId, "RANKED", seed, [first.user, second.user]);
+    room.sockets.set(first.user.id, first.socketId);
+    room.sockets.set(second.user.id, second.socketId);
+    rooms.set(room.id, room);
+    for (const e of [first, second]) {
+      playerRooms.set(e.user.id, room.id);
+      io2.sockets.sockets.get(e.socketId)?.join(room.id);
+    }
+    io2.to(room.id).emit("match:found", {
+      roomId: room.id,
+      players: [first.user, second.user].map(({ id, username, mmr }) => ({ id, username, mmr })),
+      seed
+    });
+    setTimeout(() => startRoom(io2, room), 2500);
+  } catch (error) {
+    console.error("ranked_room_failed", {
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : "Unknown"
+    });
+    for (const e of [first, second]) {
+      playerRooms.delete(e.user.id);
+      const socket = io2.sockets.sockets.get(e.socketId);
+      socket?.emit("match:error", { code: "MATCH_CREATE_FAILED", message: "N\xE3o foi poss\xEDvel abrir a partida. Tente de novo." });
+      requeue(io2, e);
+    }
+  }
+}
+function requeue(io2, entry) {
+  if (!socketUsers.has(entry.socketId) || playerRooms.has(entry.user.id) || queueHasUser(entry.user.id)) return;
+  if (queue.size >= env.MAX_QUEUE_SIZE || !capacityAvailable()) {
+    io2.to(entry.socketId).emit("match:error", { code: "SERVER_FULL", message: "A quadra est\xE1 lotada. Tente novamente em instantes." });
+    return;
+  }
+  queue.set(entry.socketId, { ...entry, joinedAt: Date.now() });
+  io2.to(entry.socketId).emit("matchmaking:status", { status: "SEARCHING", joinedAt: Date.now(), range: 100 });
 }
 async function startTraining(io2, socket, requested) {
   const user = socketUsers.get(socket.id);
   if (playerRooms.has(user.id)) return socket.emit("match:error", { code: "ALREADY_PLAYING", message: "Voc\xEA j\xE1 est\xE1 em uma partida." });
+  if (!capacityAvailable()) return serverFull(socket);
   const difficulty = ["INICIANTE", "NORMAL", "DIFICIL", "INSANO"].includes(requested || "") ? requested : "NORMAL";
-  const seed = Math.floor(Math.random() * 2e9);
-  const matchId = await createMatch("TRAINING", seed, [{ userId: user.id, mmrBefore: user.mmr }]);
-  const room = makeRoom(matchId, "TRAINING", seed, [user, { id: `bot:${matchId}`, username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro", mmr: user.mmr, verified: true, region: user.region }]);
-  room.difficulty = difficulty;
-  room.sockets.set(user.id, socket.id);
-  rooms.set(room.id, room);
-  playerRooms.set(user.id, room.id);
-  socket.join(room.id);
-  socket.emit("match:found", { roomId: room.id, players: Object.values(room.state.players).map((p) => ({ id: p.id, username: p.username })), seed, training: true, difficulty });
-  setTimeout(() => startRoom(io2, room), 1200);
+  try {
+    const seed = Math.floor(Math.random() * 2e9);
+    const matchId = await createMatch("TRAINING", seed, [{ userId: user.id, mmrBefore: user.mmr }]);
+    const room = makeRoom(matchId, "TRAINING", seed, [user, {
+      id: `bot:${matchId}`,
+      username: difficulty === "INSANO" ? "Lenda da Arquibancada" : "Rival do Bairro",
+      mmr: user.mmr,
+      verified: true,
+      region: user.region
+    }]);
+    room.difficulty = difficulty;
+    room.sockets.set(user.id, socket.id);
+    rooms.set(room.id, room);
+    playerRooms.set(user.id, room.id);
+    socket.join(room.id);
+    socket.emit("match:found", {
+      roomId: room.id,
+      players: Object.values(room.state.players).map((p) => ({ id: p.id, username: p.username })),
+      seed,
+      training: true,
+      difficulty
+    });
+    setTimeout(() => startRoom(io2, room), 1200);
+  } catch (error) {
+    console.error("training_room_failed", {
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : "Unknown"
+    });
+    playerRooms.delete(user.id);
+    socket.emit("match:error", { code: "MATCH_CREATE_FAILED", message: "N\xE3o foi poss\xEDvel abrir o treino. Tente de novo." });
+  }
 }
 function makeRoom(id, mode, seed, users) {
   const now = Date.now();
-  return { id, mode, state: createGame(seed, users, now), events: [], sockets: /* @__PURE__ */ new Map(), eventCursor: 0, timer: setInterval(() => {
-  }, 6e4), nextBotActionAt: now, disconnected: /* @__PURE__ */ new Map(), ending: false };
+  return {
+    id,
+    mode,
+    state: createGame(seed, users, now),
+    events: [],
+    sockets: /* @__PURE__ */ new Map(),
+    eventCursor: 0,
+    nextBotActionAt: now,
+    disconnected: /* @__PURE__ */ new Map(),
+    ending: false,
+    active: false
+  };
 }
 function startRoom(io2, room) {
-  clearInterval(room.timer);
+  if (room.ending || !rooms.has(room.id)) return;
   const now = Date.now();
   room.state.phase = "ROUND_ACTIVE";
   room.state.roundEndsAt = now + 45e3;
   room.events = generateEvents(room.state.seed + room.state.round, now, 10);
   room.eventCursor = 0;
   room.nextBotActionAt = now + 500;
-  void markMatchActive(room.id);
+  room.active = true;
+  void markMatchActive(room.id).catch((error) => console.error("mark_active_failed", {
+    matchId: room.id,
+    message: error instanceof Error ? error.message : "Unknown"
+  }));
   io2.to(room.id).emit("match:start", { ...safeState(room), countdownEndedAt: now });
-  room.timer = setInterval(() => tickRoom(io2, room), 100);
+  ensureTicker(io2);
 }
 function tickRoom(io2, room) {
   const now = Date.now();
@@ -1054,7 +1263,7 @@ function tickBot(io2, room, now) {
   const result = applyInput(room.state, { playerId: bot.id, input: "SIX", clientTimestamp: now, sequence: bot.lastSequence + 1 }, now);
   io2.to(room.id).emit("match:action", { playerId: bot.id, input: "SIX", result, serverTime: now });
   setTimeout(() => {
-    if (room.state.phase !== "ROUND_ACTIVE") return;
+    if (room.state.phase !== "ROUND_ACTIVE" || room.ending) return;
     const at = Date.now();
     const result2 = applyInput(room.state, { playerId: bot.id, input: "SEVEN", clientTimestamp: at, sequence: bot.lastSequence + 1 }, at);
     io2.to(room.id).emit("match:action", { playerId: bot.id, input: "SEVEN", result: result2, serverTime: at });
@@ -1070,9 +1279,26 @@ function handleInput(io2, socket, raw, ack) {
   io2.to(room.id).emit("match:action", { playerId: user.id, input: raw.input, result, serverTime: Date.now() });
   io2.to(room.id).emit("match:state", safeState(room));
 }
+function handleCollectOrb(io2, socket, ack) {
+  const room = getRoomFor(socket), user = socketUsers.get(socket.id);
+  if (!room || !user || room.state.phase !== "ROUND_ACTIVE") return ack?.({ accepted: false, reason: "ROOM" });
+  const player = room.state.players[user.id];
+  if (!player) return ack?.({ accepted: false, reason: "PLAYER" });
+  const result = collectAuraOrb(player);
+  ack?.(result);
+  if (!result.accepted) return;
+  room.state.version++;
+  io2.to(room.id).emit("match:orb_collected", {
+    playerId: user.id,
+    multiplier: result.multiplier,
+    orbClaims: player.orbClaims,
+    state: safeState(room)
+  });
+}
 function endRound(io2, room) {
   if (room.state.phase !== "ROUND_ACTIVE") return;
   room.state.phase = "ROUND_ENDING";
+  room.active = false;
   const players = Object.values(room.state.players).sort((a, b) => b.aura - a.aura);
   if (players[0].aura === players[1].aura) {
     const sudden = { ...generateEvents(room.state.seed + 999, Date.now(), 1)[0], name: "Morte s\xFAbita", kind: "PRESSAO", reward: 67, risk: 67, penalty: 30, startsAt: Date.now() + 1e3 };
@@ -1080,6 +1306,7 @@ function endRound(io2, room) {
     room.eventCursor = 0;
     room.state.roundEndsAt = sudden.startsAt + sudden.duration;
     room.state.phase = "ROUND_ACTIVE";
+    room.active = true;
     return io2.to(room.id).emit("match:event", { event: sudden, suddenDeath: true, serverTime: Date.now() });
   }
   const roundWinner = players[0];
@@ -1093,36 +1320,47 @@ function endRound(io2, room) {
     player.ego = 0;
     player.combo = 0;
     player.pendingSixAt = null;
+    player.multiplier = 1;
+    player.orbClaims = 0;
   }
   setTimeout(() => startRoom(io2, room), 3500);
 }
 async function finishRoom(io2, room, winnerId, reason) {
   if (room.ending) return;
   room.ending = true;
-  clearInterval(room.timer);
+  room.active = false;
   room.state.phase = "FINISHED";
   room.state.winnerId = winnerId;
   const players = Object.values(room.state.players);
-  if (room.mode === "RANKED") {
-    const [a, b] = players;
-    const profiles = await getMatchProfiles([a.id, b.id]);
-    const updates = players.map((p, index) => {
-      const profile = profiles.find((x) => x.userId === p.id);
-      const opponent = profiles.find((x) => x.userId !== p.id);
-      const won = p.id === winnerId, delta = mmrDelta(profile.mmr, opponent.mmr, won ? 1 : 0, reason === "ABANDON" && !won);
-      return { p, profile, won, delta, opponent: players[1 - index] };
+  try {
+    if (room.mode === "RANKED") {
+      const [a, b] = players;
+      const profiles = await getMatchProfiles([a.id, b.id]);
+      const updates = players.map((p, index) => {
+        const profile = profiles.find((x) => x.userId === p.id);
+        const opponent = profiles.find((x) => x.userId !== p.id);
+        const won = p.id === winnerId, delta = mmrDelta(profile.mmr, opponent.mmr, won ? 1 : 0, reason === "ABANDON" && !won);
+        return { p, profile, won, delta, opponent: players[1 - index] };
+      });
+      await finishRankedMatch(room.id, winnerId, reason, updates.map(({ p, profile, won, delta }) => ({
+        player: p,
+        profile,
+        won,
+        delta,
+        rank: rankForAura(profile.totalAura + p.aura)
+      })));
+      io2.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room), mmrChanges: Object.fromEntries(updates.map((u) => [u.p.id, u.delta])) });
+    } else {
+      const human = players.find((p) => !p.id.startsWith("bot:"));
+      await finishTrainingMatch(room.id, winnerId, reason, human);
+      io2.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
+    }
+  } catch (error) {
+    console.error("finish_room_failed", {
+      matchId: room.id,
+      mode: room.mode,
+      message: error instanceof Error ? error.message : "Unknown"
     });
-    await finishRankedMatch(room.id, winnerId, reason, updates.map(({ p, profile, won, delta }) => ({
-      player: p,
-      profile,
-      won,
-      delta,
-      rank: rankFor(profile.mmr + delta)
-    })));
-    io2.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room), mmrChanges: Object.fromEntries(updates.map((u) => [u.p.id, u.delta])) });
-  } else {
-    const human = players.find((p) => !p.id.startsWith("bot:"));
-    await finishTrainingMatch(room.id, winnerId, reason, human);
     io2.to(room.id).emit("match:end", { winnerId, reason, state: safeState(room) });
   }
   setTimeout(() => cleanupRoom(room), 5e3);
@@ -1160,24 +1398,23 @@ function forfeit(io2, socket) {
   void finishRoom(io2, room, opponent, "FORFEIT");
 }
 function cleanupRoom(room) {
-  clearInterval(room.timer);
+  room.active = false;
   rooms.delete(room.id);
   for (const id of Object.keys(room.state.players)) if (!id.startsWith("bot:")) playerRooms.delete(id);
-}
-function rankFor(mmr) {
-  if (mmr >= 1900) return "AURA_LENDARIA";
-  if (mmr >= 1750) return "EGO_INABALAVEL";
-  if (mmr >= 1600) return "PRESENCA_DOMINANTE";
-  if (mmr >= 1450) return "SIX_SEVEN_CERTIFICADO";
-  if (mmr >= 1300) return "FARMER_DE_AURA";
-  if (mmr >= 1150) return "AURA_QUESTIONAVEL";
-  if (mmr >= 950) return "EGO_FRAGIL";
-  return "SEM_PRESENCA";
 }
 
 // apps/server/src/index.ts
 var http = (0, import_node_http.createServer)(app);
-var io = new import_socket.Server(http, { cors: { origin: env.SOCKET_CORS_ORIGIN, credentials: true }, transports: ["websocket", "polling"], maxHttpBufferSize: 32e3, pingInterval: 1e4, pingTimeout: 7e3 });
+var io = new import_socket.Server(http, {
+  cors: { origin: env.SOCKET_CORS_ORIGIN, credentials: true },
+  transports: ["websocket", "polling"],
+  maxHttpBufferSize: 32e3,
+  pingInterval: 2e4,
+  pingTimeout: 25e3,
+  perMessageDeflate: false,
+  httpCompression: false,
+  connectTimeout: 2e4
+});
 attachRealtime(io);
 async function start() {
   try {
@@ -1192,6 +1429,11 @@ async function start() {
   }
 }
 void start();
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandled_rejection", {
+    message: reason instanceof Error ? reason.message : String(reason)
+  });
+});
 var shutdown = async () => {
   io.close();
   http.close();
